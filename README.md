@@ -2,31 +2,54 @@
 
 ## Project Description
 
-This project implements the **core infrastructure of a financial exchange** — the system responsible for accepting orders, maintaining market state, and (eventually) matching trades.
+This project implements the **core infrastructure of a financial exchange** — the system responsible for accepting orders, maintaining market state, persisting data, and producing deterministic market outputs.
 
 This is **not a trading bot** and **not a toy simulation**.  
-It focuses on correctness, determinism, and clean system design, similar to how real stock or crypto exchanges are built internally.
+It focuses on **correctness, determinism, durability, and clean system design**, similar to how real stock or crypto exchanges are built internally.
 
 The system is split into three services:
 
 - **Engine (Rust, gRPC)**  
-  The headless core of the exchange. It validates orders, assigns deterministic sequence numbers, and maintains in-memory market state (currently top-of-book). It exposes only gRPC APIs and has no HTTP or UI logic.
+  The authoritative core of the exchange. It validates orders, assigns deterministic sequence numbers, maintains a price-time priority order book, performs matching, and persists state.  
+  It exposes only gRPC APIs and contains **no HTTP or UI logic**.
 
 - **Gateway (Node.js, REST)**  
-  A browser-friendly REST service that calls the engine via gRPC. It exists to decouple the UI from the core engine.
+  A browser-friendly REST service that calls the engine via gRPC. It decouples the UI from the core engine and exposes market data, order entry, and a trade tape.
 
 - **UI (Next.js)**  
-  A browser-based frontend that visualizes market data. It talks only to the gateway and never directly to the engine.
+  A browser-based frontend that visualizes live market data. It communicates only with the gateway and never directly with the engine.
 
-This separation is intentional and mirrors real-world exchange architecture.
+This separation is intentional and mirrors real-world exchange architecture where the matching engine is isolated and authoritative.
 
-Currently, the engine supports:
+---
+
+## Current Capabilities
+
+### Engine
 - order submission with validation
-- deterministic sequencing
-- in-memory best bid / best ask per symbol
-- read API for top-of-book
+- deterministic global sequence numbers
+- full in-memory price-time priority order book (FIFO per price level)
+- order matching with explicit fill records
+- write-ahead logging (WAL) for durability
+- snapshotting on clean shutdown
+- deterministic state recovery on restart (snapshot + WAL replay)
+- gRPC APIs for health, order entry, top-of-book, and depth
 
-Future milestones include full order books, matching, trades, persistence, replay, metrics, and containerization.
+### Gateway
+- REST → gRPC translation layer
+- `/orders` for order submission
+- `/tob` for top-of-book
+- `/depth` for L2 depth
+- `/events` trade tape (order accepted + fills)
+- `/health` service health checks
+
+### UI
+- live top-of-book display
+- L2 depth view
+- order entry (BUY / SELL)
+- fill feedback per submission
+- trade tape showing accepted orders and fills
+- polling-based updates (WebSockets planned)
 
 ---
 
@@ -40,7 +63,6 @@ You must have the following installed:
 - Node.js (v18+ recommended)
 - npm
 - protoc (Protocol Buffers compiler)
-- grpcurl (for testing the engine)
 
 Verify installations:
 
@@ -81,5 +103,14 @@ make gateway
 make ui
 ```
 - Open your browser: http://localhost:3000
+
+## Resetting the System (Start from Scratch and remove all existed data)
+```bash
+rm -f services/engine/engine/data/snapshot.json
+rm -f services/engine/engine/data/wal.jsonl
+make engine
+make gateway
+make ui
+```
 
 
