@@ -50,8 +50,36 @@ node --version
 npm --version
 protoc --version
 grpcurl -version
-'''
-## Clone the Repository
-'''bash
+```
+### Clone the Repository
+```bash
 git clone https://github.com/TriBuuLe/exchange-grade-order-matching.git
 cd exchange-grade-order-matching
+```
+### Install Dependencies
+```bash
+cd services/gateway && npm install
+cd ../ui && npm install
+```
+
+## Run the System (Development)
+- This project uses a Makefile so you do not need to manually cd into service directories.
+- Open three terminals and run the following commands from the repository root.
+### Start the Engine (gRPC – port 50051)
+```bash
+make engine
+```
+- You should see: engine listening on 0.0.0.0:50051
+
+### Start the Gateway (REST - port 8080)
+```bash
+make gateway
+```
+
+### Start the UI (Next.js - port 3000)
+```bash
+make ui
+```
+- Open your browser: http://localhost:3000
+
+
