@@ -1,0 +1,14 @@
+/home/hale0123/exchange-engine/services/engine/engine/target/debug/deps/serde-608fb61135a00eb1.d: /home/hale0123/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /home/hale0123/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /home/hale0123/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /home/hale0123/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /home/hale0123/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /home/hale0123/exchange-engine/services/engine/engine/target/debug/build/serde-298a70cb9e85f94a/out/private.rs
+
+/home/hale0123/exchange-engine/services/engine/engine/target/debug/deps/libserde-608fb61135a00eb1.rlib: /home/hale0123/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /home/hale0123/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /home/hale0123/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /home/hale0123/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /home/hale0123/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /home/hale0123/exchange-engine/services/engine/engine/target/debug/build/serde-298a70cb9e85f94a/out/private.rs
+
+/home/hale0123/exchange-engine/services/engine/engine/target/debug/deps/libserde-608fb61135a00eb1.rmeta: /home/hale0123/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /home/hale0123/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /home/hale0123/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /home/hale0123/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /home/hale0123/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /home/hale0123/exchange-engine/services/engine/engine/target/debug/build/serde-298a70cb9e85f94a/out/private.rs
+
+/home/hale0123/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs:
+/home/hale0123/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs:
+/home/hale0123/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs:
+/home/hale0123/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs:
+/home/hale0123/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs:
+/home/hale0123/exchange-engine/services/engine/engine/target/debug/build/serde-298a70cb9e85f94a/out/private.rs:
+
+# env-dep:OUT_DIR=/home/hale0123/exchange-engine/services/engine/engine/target/debug/build/serde-298a70cb9e85f94a/out

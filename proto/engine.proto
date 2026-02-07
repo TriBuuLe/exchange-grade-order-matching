@@ -1,0 +1,9 @@
+syntax = "proto3";
+package engine.v1;
+
+service Engine {
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+message HealthRequest {}
+message HealthResponse { string status = 1; }

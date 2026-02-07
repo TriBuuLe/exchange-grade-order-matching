@@ -1,0 +1,2 @@
+cargo:rerun-if-changed=../../../proto/engine.proto
+cargo:rerun-if-changed=../../../proto
