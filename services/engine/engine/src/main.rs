@@ -1,9 +1,13 @@
+// services/engine/engine/src/main.rs
+
 mod order_book;
+mod wal;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use order_book::{Order, OrderBook, Side as BookSide};
+use wal::{Wal, WalEntry};
 
 use tonic::{transport::Server, Request, Response, Status};
 
@@ -13,20 +17,21 @@ pub mod engine {
 
 use engine::engine_server::{Engine, EngineServer};
 use engine::{
-    GetBookDepthRequest, GetBookDepthResponse, GetTopOfBookRequest, GetTopOfBookResponse,
+    Fill, GetBookDepthRequest, GetBookDepthResponse, GetTopOfBookRequest, GetTopOfBookResponse,
     HealthRequest, HealthResponse, PriceLevel, Side, SubmitOrderRequest, SubmitOrderResponse,
 };
 
 #[derive(Debug, Default)]
-struct EngineState {
-    seq: u64,
+pub struct EngineState {
+    pub seq: u64,
     // symbol -> full price-level book (real FIFO order book)
-    books: HashMap<String, OrderBook>,
+    pub books: HashMap<String, OrderBook>,
 }
 
 #[derive(Clone)]
 struct EngineSvc {
     state: Arc<Mutex<EngineState>>,
+    wal: Wal,
 }
 
 impl EngineSvc {
@@ -42,6 +47,14 @@ impl EngineSvc {
         st.seq += 1;
         st.seq
     }
+}
+
+fn env_or_default(key: &str, default: &str) -> String {
+    std::env::var(key)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| default.to_string())
 }
 
 #[tonic::async_trait]
@@ -78,31 +91,62 @@ impl Engine for EngineSvc {
 
         let client_order_id = o.client_order_id.trim().to_string();
 
-        let accepted_seq = self.with_state(|st| {
+        // Single-writer mutex: append WAL then mutate memory.
+        let (accepted_seq, fills_out) = self.with_state(|st| {
             let seq = Self::next_seq(st);
 
+            let side_str = if o.side == Side::Buy as i32 { "BUY" } else { "SELL" };
+
+            // 1) Append WAL entry FIRST (durability boundary for "accepted")
+            let entry = WalEntry {
+                seq,
+                symbol: symbol.clone(),
+                side: side_str.to_string(),
+                price: o.price,
+                qty: o.qty,
+                client_order_id: client_order_id.clone(),
+            };
+
+            if let Err(e) = self.wal.append(&entry) {
+                // Roll back seq so sequence stays gap-free if WAL write fails
+                st.seq -= 1;
+                return Err(Status::unavailable(format!("WAL append failed: {e}")));
+            }
+
+            // 2) Apply to in-memory book (matching happens here)
             let side = if o.side == Side::Buy as i32 {
                 BookSide::Buy
             } else {
                 BookSide::Sell
             };
 
-            // Get/create book for symbol
-            let book = st.books.entry(symbol).or_insert_with(OrderBook::new);
+            let book = st.books.entry(symbol.clone()).or_insert_with(OrderBook::new);
 
-            // v1: NO MATCHING. We just rest orders into FIFO price levels.
-            book.add(Order {
+            let fills = book.add(Order {
                 seq,
                 side,
                 price: o.price,
                 qty: o.qty,
-                client_order_id,
+                client_order_id: client_order_id.clone(),
             });
 
-            seq
-        });
+            let fills_out: Vec<Fill> = fills
+                .into_iter()
+                .map(|f| Fill {
+                    maker_seq: f.maker_seq,
+                    taker_seq: f.taker_seq,
+                    price: f.price,
+                    qty: f.qty,
+                })
+                .collect();
 
-        Ok(Response::new(SubmitOrderResponse { accepted_seq }))
+            Ok((seq, fills_out))
+        })?;
+
+        Ok(Response::new(SubmitOrderResponse {
+            accepted_seq,
+            fills: fills_out,
+        }))
     }
 
     async fn get_top_of_book(
@@ -151,7 +195,6 @@ impl Engine for EngineSvc {
                 None => return (Vec::new(), Vec::new()),
             };
 
-            // bids: best -> worse (highest -> lower)
             let bids_out: Vec<PriceLevel> = book
                 .bids
                 .iter()
@@ -163,7 +206,6 @@ impl Engine for EngineSvc {
                 })
                 .collect();
 
-            // asks: best -> worse (lowest -> higher)
             let asks_out: Vec<PriceLevel> = book
                 .asks
                 .iter()
@@ -183,16 +225,106 @@ impl Engine for EngineSvc {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = "0.0.0.0:50051".parse()?;
+    // Default WAL path under engine crate:
+    // services/engine/engine/data/wal.jsonl
+    let wal_path = env_or_default("ENGINE_WAL_PATH", "data/wal.jsonl");
+    let wal = Wal::new(&wal_path);
+
+    // ---- startup debug (prove we're reading the file we think we are) ----
+    let cwd = std::env::current_dir().ok();
+    println!("[startup] cwd = {:?}", cwd);
+
+    let wal_abs = cwd
+        .as_ref()
+        .map(|d| d.join(&wal_path))
+        .unwrap_or_else(|| std::path::PathBuf::from(&wal_path));
+    println!("[startup] wal_path (cfg) = {}", wal_path);
+    println!("[startup] wal_path (abs) = {:?}", wal_abs);
+
+    match std::fs::metadata(wal.wal_path()) {
+        Ok(m) => println!("[startup] wal metadata: exists=true size={} bytes", m.len()),
+        Err(e) => println!("[startup] wal metadata: exists=false err={}", e),
+    }
+
+    match std::fs::metadata(wal.snapshot_path()) {
+        Ok(m) => println!(
+            "[startup] snapshot metadata: exists=true size={} bytes",
+            m.len()
+        ),
+        Err(e) => println!("[startup] snapshot metadata: exists=false err={}", e),
+    }
+    // ---------------------------------------------------------------
+
+    // Create state, then replay snapshot + WAL into it BEFORE serving.
+    let mut st = EngineState::default();
+
+    match wal.replay_into_with_stats(&mut st) {
+        Ok(stats) => {
+            if stats.snapshot_present {
+                println!(
+                    "[snapshot] loaded seq={} books={} orders={} from {}",
+                    stats.snapshot_seq,
+                    stats.snapshot_books,
+                    stats.snapshot_orders,
+                    wal.snapshot_path().display()
+                );
+            } else {
+                println!("[snapshot] none present (cold start)");
+            }
+
+            println!(
+                "[wal] replayed {} entries after snapshot_seq={} from {}",
+                stats.wal_replayed,
+                stats.wal_after_seq,
+                wal.wal_path().display()
+            );
+        }
+        Err(e) => {
+            // Hard fail: if WAL/snapshot is corrupt, we should not serve incorrect state.
+            eprintln!(
+                "[startup] restore failed (snapshot={}, wal={}): {}",
+                wal.snapshot_path().display(),
+                wal.wal_path().display(),
+                e
+            );
+            return Err(e.into());
+        }
+    }
+
     let svc = EngineSvc {
-        state: Arc::new(Mutex::new(EngineState::default())),
+        state: Arc::new(Mutex::new(st)),
+        wal,
     };
 
+    let addr = "0.0.0.0:50051".parse()?;
     println!("engine listening on {}", addr);
+
+    let state_for_shutdown = svc.state.clone();
+    let wal_for_shutdown = svc.wal.clone();
 
     Server::builder()
         .add_service(EngineServer::new(svc))
-        .serve(addr)
+        .serve_with_shutdown(addr, async move {
+            // waits for Ctrl+C
+            let _ = tokio::signal::ctrl_c().await;
+
+            // best-effort snapshot on clean shutdown
+            if let Ok(st) = state_for_shutdown.lock() {
+                if let Err(e) = wal_for_shutdown.write_snapshot(&st) {
+                    eprintln!("[snapshot] write failed: {e}");
+                } else {
+                    println!("[snapshot] wrote snapshot OK");
+
+                    if let Err(e) = wal_for_shutdown.truncate_wal() {
+                        eprintln!("[wal] truncate failed: {e}");
+                    } else {
+                        println!("[wal] truncated");
+                    }
+                }
+            } else {
+                eprintln!("[snapshot] state mutex poisoned; snapshot skipped");
+            }
+        })
         .await?;
 
     Ok(())

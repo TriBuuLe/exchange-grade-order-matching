@@ -1,0 +1,67 @@
+{
+  "seq": 32,
+  "books": [
+    {
+      "symbol": "BTC-USD",
+      "bids": [
+        {
+          "seq": 27,
+          "side": "Buy",
+          "price": 50,
+          "qty": 3,
+          "client_order_id": "ui-1770497446425"
+        },
+        {
+          "seq": 25,
+          "side": "Buy",
+          "price": 102,
+          "qty": 1,
+          "client_order_id": "ui-1770497392280"
+        }
+      ],
+      "asks": [
+        {
+          "seq": 32,
+          "side": "Sell",
+          "price": 110,
+          "qty": 8,
+          "client_order_id": "ui-1770498179546"
+        },
+        {
+          "seq": 18,
+          "side": "Sell",
+          "price": 12003,
+          "qty": 100,
+          "client_order_id": "ui-1770497082669"
+        }
+      ]
+    },
+    {
+      "symbol": "AAPL",
+      "bids": [
+        {
+          "seq": 2,
+          "side": "Buy",
+          "price": 100,
+          "qty": 5,
+          "client_order_id": ""
+        },
+        {
+          "seq": 3,
+          "side": "Buy",
+          "price": 100,
+          "qty": 5,
+          "client_order_id": ""
+        },
+        {
+          "seq": 4,
+          "side": "Buy",
+          "price": 101,
+          "qty": 1,
+          "client_order_id": ""
+        }
+      ],
+      "asks": []
+    }
+  ]
+}

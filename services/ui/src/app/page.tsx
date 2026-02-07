@@ -12,12 +12,43 @@ type TopOfBook = {
 type DepthLevel = { price: string; qty: string };
 type BookDepth = { bids: DepthLevel[]; asks: DepthLevel[] };
 
-// Keep these types for future WS (we're not deleting them)
-type WsHello = { type: "hello"; msg: string };
-type WsSubscribed = { type: "subscribed"; symbol: string };
-type WsTopOfBook = { type: "top_of_book"; symbol: string; data: TopOfBook };
-type WsError = { type: "error"; error: string };
-type WsMsg = WsHello | WsSubscribed | WsTopOfBook | WsError;
+// Fill reporting
+type Fill = {
+  maker_seq: string;
+  taker_seq: string;
+  price: string;
+  qty: string;
+};
+
+type SubmitOrderOk = {
+  accepted_seq: string;
+  fills: Fill[];
+};
+
+// ---- Trade Tape (gateway /events) ----
+type OrderAcceptedEvent = {
+  type: "order_accepted";
+  ts: number;
+  symbol: string;
+  side: "BUY" | "SELL";
+  price: number;
+  qty: number;
+  accepted_seq: string;
+  client_order_id?: string;
+};
+
+type FillEvent = {
+  type: "fill";
+  ts: number;
+  symbol: string;
+  price: number;
+  qty: number;
+  maker_seq: string;
+  taker_seq: string;
+};
+
+type TradeEvent = OrderAcceptedEvent | FillEvent;
+type EventsResponse = { symbol: string; events: TradeEvent[] };
 
 // Prefer env var (correct), fallback to same-host dev behavior
 function gatewayBaseUrl() {
@@ -38,6 +69,15 @@ function wsUrl() {
   return `${proto}://${host}:8080/ws`;
 }
 
+function fmtTime(ts: number) {
+  try {
+    const d = new Date(ts);
+    return d.toLocaleTimeString();
+  } catch {
+    return String(ts);
+  }
+}
+
 export default function Page() {
   // market / "ws" status (now reflects polling connectivity)
   const [symbol, setSymbol] = useState("BTC-USD");
@@ -48,11 +88,12 @@ export default function Page() {
   const [depth, setDepth] = useState<BookDepth | null>(null);
   const [lastMsg, setLastMsg] = useState<string>("");
 
-  // Keep WS ref for later (not used in v0)
-  const wsRef = useRef<WebSocket | null>(null);
+  // NEW: UI debug toggle (hides ugly REST + JSON blocks)
+  const [showDebug, setShowDebug] = useState(false);
 
-  // Polling timer ref (v0)
+  // Polling timer refs (v0)
   const pollRef = useRef<number | null>(null);
+  const eventsPollRef = useRef<number | null>(null);
 
   // order entry
   const [side, setSide] = useState<"BUY" | "SELL">("BUY");
@@ -60,6 +101,13 @@ export default function Page() {
   const [qty, setQty] = useState<string>("1");
   const [submitting, setSubmitting] = useState(false);
   const [submitResult, setSubmitResult] = useState<string>("");
+
+  // last fills panel state
+  const [lastAcceptedSeq, setLastAcceptedSeq] = useState<string | null>(null);
+  const [lastFills, setLastFills] = useState<Fill[]>([]);
+
+  // trade tape
+  const [events, setEvents] = useState<TradeEvent[]>([]);
 
   const bid = useMemo(() => (tob ? Number(tob.best_bid_price) : 0), [tob]);
   const ask = useMemo(() => (tob ? Number(tob.best_ask_price) : 0), [tob]);
@@ -77,12 +125,9 @@ export default function Page() {
     const res = await fetch(url, { cache: "no-store" });
     const text = await res.text();
 
-    // keep lastMsg as debug (what the gateway returned)
     setLastMsg(text);
 
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}: ${text}`);
-    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${text}`);
 
     const data = JSON.parse(text) as TopOfBook;
     setTob(data);
@@ -95,29 +140,36 @@ export default function Page() {
     const res = await fetch(url, { cache: "no-store" });
     const text = await res.text();
 
-    // keep lastMsg useful for debugging; depth will overwrite it as well
     setLastMsg(text);
 
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}: ${text}`);
-    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${text}`);
 
     const data = JSON.parse(text) as BookDepth;
     setDepth(data);
   }
 
+  async function fetchEvents(sym: string) {
+    const base = gatewayBaseUrl();
+    const url = `${base}/events?symbol=${encodeURIComponent(sym)}&limit=30`;
+
+    const res = await fetch(url, { cache: "no-store" });
+    const text = await res.text();
+
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${text}`);
+
+    const data = JSON.parse(text) as EventsResponse;
+    setEvents(Array.isArray(data.events) ? data.events : []);
+  }
+
   function connectAndSubscribe(sym: string) {
-    // v0: REST polling, not WebSockets
-    // clean up any old poll
+    // clean up any old polls
     if (pollRef.current) {
       window.clearInterval(pollRef.current);
       pollRef.current = null;
     }
-
-    // if any old ws exists, close it (future-proof)
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
+    if (eventsPollRef.current) {
+      window.clearInterval(eventsPollRef.current);
+      eventsPollRef.current = null;
     }
 
     setStatus("connecting");
@@ -128,17 +180,19 @@ export default function Page() {
       setStatus("disconnected");
       setTob(null);
       setDepth(null);
+      setEvents([]);
       setLastMsg(`{"error":"symbol is required"}`);
       return;
     }
 
     // immediate fetch, then poll
-    Promise.all([fetchTopOfBook(s), fetchDepth(s, 10)])
+    Promise.all([fetchTopOfBook(s), fetchDepth(s, 10), fetchEvents(s)])
       .then(() => setStatus("connected"))
       .catch((e: any) => {
         setStatus("disconnected");
         setTob(null);
         setDepth(null);
+        setEvents([]);
         setLastMsg(`{"error":"${e?.message ?? String(e)}"}`);
       });
 
@@ -151,6 +205,12 @@ export default function Page() {
           setDepth(null);
           setLastMsg(`{"error":"${e?.message ?? String(e)}"}`);
         });
+    }, 1000);
+
+    eventsPollRef.current = window.setInterval(() => {
+      fetchEvents(s).catch(() => {
+        // don't nuke UI if tape fetch fails
+      });
     }, 1000);
   }
 
@@ -177,7 +237,6 @@ export default function Page() {
       return;
     }
 
-    // simple deterministic-ish client id for now
     const clientOrderId = `ui-${Date.now()}`;
 
     try {
@@ -194,13 +253,31 @@ export default function Page() {
       });
 
       const text = await res.text();
+
       if (!res.ok) {
         setSubmitResult(`Error ${res.status}: ${text}`);
-      } else {
-        setSubmitResult(`OK: ${text}`);
+        setLastAcceptedSeq(null);
+        setLastFills([]);
+        return;
       }
+
+      try {
+        const data = JSON.parse(text) as SubmitOrderOk;
+        setLastAcceptedSeq(String(data.accepted_seq));
+        setLastFills(Array.isArray(data.fills) ? data.fills : []);
+      } catch {
+        setLastAcceptedSeq(null);
+        setLastFills([]);
+      }
+
+      setSubmitResult(`OK: ${text}`);
+
+      // pull newest tape right after submit so it feels instant
+      fetchEvents(symbol.trim()).catch(() => {});
     } catch (e: any) {
       setSubmitResult(`Network error: ${e?.message ?? String(e)}`);
+      setLastAcceptedSeq(null);
+      setLastFills([]);
     } finally {
       setSubmitting(false);
     }
@@ -211,7 +288,7 @@ export default function Page() {
 
     return () => {
       if (pollRef.current) window.clearInterval(pollRef.current);
-      if (wsRef.current) wsRef.current.close();
+      if (eventsPollRef.current) window.clearInterval(eventsPollRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -227,19 +304,28 @@ export default function Page() {
             </p>
           </div>
 
-          <div className="rounded-xl border border-neutral-800 bg-neutral-900 px-3 py-2 text-xs">
-            <div className="flex items-center gap-2">
-              <span
-                className={[
-                  "h-2 w-2 rounded-full",
-                  status === "connected"
-                    ? "bg-green-500"
-                    : status === "connecting"
-                    ? "bg-yellow-500"
-                    : "bg-red-500",
-                ].join(" ")}
-              />
-              <span className="text-neutral-300">{status}</span>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => setShowDebug((v) => !v)}
+              className="rounded-xl border border-neutral-800 bg-neutral-900 px-3 py-2 text-xs text-neutral-300 hover:bg-neutral-800"
+            >
+              {showDebug ? "Hide debug" : "Show debug"}
+            </button>
+
+            <div className="rounded-xl border border-neutral-800 bg-neutral-900 px-3 py-2 text-xs">
+              <div className="flex items-center gap-2">
+                <span
+                  className={[
+                    "h-2 w-2 rounded-full",
+                    status === "connected"
+                      ? "bg-green-500"
+                      : status === "connecting"
+                      ? "bg-yellow-500"
+                      : "bg-red-500",
+                  ].join(" ")}
+                />
+                <span className="text-neutral-300">{status}</span>
+              </div>
             </div>
           </div>
         </div>
@@ -269,24 +355,34 @@ export default function Page() {
                 Subscribe
               </button>
 
-              <p className="mt-3 text-[11px] text-neutral-500">
-                REST:{" "}
-                <span className="text-neutral-300">
-                  {gatewayBaseUrl()}/tob?symbol=...
-                </span>
-              </p>
+              {showDebug ? (
+                <>
+                  <p className="mt-3 text-[11px] text-neutral-500">
+                    REST:{" "}
+                    <span className="text-neutral-300">
+                      {gatewayBaseUrl()}/tob?symbol=...
+                    </span>
+                  </p>
 
-              <p className="mt-1 text-[11px] text-neutral-500">
-                REST:{" "}
-                <span className="text-neutral-300">
-                  {gatewayBaseUrl()}/depth?symbol=...&levels=10
-                </span>
-              </p>
+                  <p className="mt-1 text-[11px] text-neutral-500">
+                    REST:{" "}
+                    <span className="text-neutral-300">
+                      {gatewayBaseUrl()}/depth?symbol=...&levels=10
+                    </span>
+                  </p>
 
-              {/* Keep WS line for future, but it's not used in v0 */}
-              <p className="mt-1 text-[11px] text-neutral-500">
-                WS (later): <span className="text-neutral-300">{wsUrl()}</span>
-              </p>
+                  <p className="mt-1 text-[11px] text-neutral-500">
+                    REST:{" "}
+                    <span className="text-neutral-300">
+                      {gatewayBaseUrl()}/events?symbol=...&limit=30
+                    </span>
+                  </p>
+
+                  <p className="mt-1 text-[11px] text-neutral-500">
+                    WS (later): <span className="text-neutral-300">{wsUrl()}</span>
+                  </p>
+                </>
+              ) : null}
             </div>
 
             {/* Order Entry */}
@@ -343,13 +439,48 @@ export default function Page() {
                 </pre>
               ) : null}
 
-              <p className="mt-3 text-[11px] text-neutral-500">
-                REST: <span className="text-neutral-300">{gatewayBaseUrl()}/orders</span>
-              </p>
+              {/* Last fills panel */}
+              <div className="mt-4 rounded-xl border border-neutral-800 bg-neutral-950 p-3">
+                <div className="flex items-center justify-between">
+                  <div className="text-xs font-semibold text-neutral-200">Last Fills</div>
+                  <div className="text-[11px] text-neutral-500">
+                    {lastAcceptedSeq ? `taker_seq=${lastAcceptedSeq}` : "—"}
+                  </div>
+                </div>
+
+                <div className="mt-2 space-y-1">
+                  {lastFills.length ? (
+                    lastFills.map((f, i) => (
+                      <div
+                        key={`${f.maker_seq}-${f.taker_seq}-${f.price}-${i}`}
+                        className="flex items-center justify-between rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-[11px]"
+                      >
+                        <div className="text-neutral-300">
+                          px <span className="text-neutral-100">{f.price}</span> · qty{" "}
+                          <span className="text-neutral-100">{f.qty}</span>
+                        </div>
+                        <div className="text-neutral-500">
+                          maker {f.maker_seq} → taker {f.taker_seq}
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="text-[11px] text-neutral-500">
+                      No fills (order rested or last submit failed).
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {showDebug ? (
+                <p className="mt-3 text-[11px] text-neutral-500">
+                  REST: <span className="text-neutral-300">{gatewayBaseUrl()}/orders</span>
+                </p>
+              ) : null}
             </div>
           </div>
 
-          {/* Right: TOB + depth + debug */}
+          {/* Right: TOB + depth + tape + debug */}
           <div className="lg:col-span-3 rounded-2xl border border-neutral-800 bg-neutral-900 p-5">
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-semibold text-neutral-200">Top of Book</h2>
@@ -431,12 +562,75 @@ export default function Page() {
               </div>
             </div>
 
-            <div className="mt-5">
-              <div className="text-xs text-neutral-500">Last message</div>
-              <pre className="mt-2 max-h-56 overflow-auto rounded-xl border border-neutral-800 bg-neutral-950 p-3 text-[11px] text-neutral-300">
-                {lastMsg || "—"}
-              </pre>
+            {/* Trade Tape */}
+            <div className="mt-5 rounded-2xl border border-neutral-800 bg-neutral-950 p-4">
+              <div className="flex items-center justify-between">
+                <div className="text-sm font-semibold text-neutral-200">Trade Tape</div>
+                <div className="text-xs text-neutral-500">Last 30 events</div>
+              </div>
+
+              <div className="mt-3 max-h-64 overflow-auto space-y-2">
+                {events.length ? (
+                  events.map((ev, i) => {
+                    if (ev.type === "order_accepted") {
+                      return (
+                        <div
+                          key={`oa-${ev.accepted_seq}-${i}`}
+                          className="rounded-xl border border-neutral-800 bg-neutral-900 px-3 py-2 text-[11px]"
+                        >
+                          <div className="flex items-center justify-between">
+                            <div className="text-neutral-300">
+                              <span className="text-neutral-500">{fmtTime(ev.ts)}</span>{" "}
+                              · ACCEPTED{" "}
+                              <span
+                                className={
+                                  ev.side === "BUY" ? "text-green-400" : "text-red-400"
+                                }
+                              >
+                                {ev.side}
+                              </span>{" "}
+                              px <span className="text-neutral-100">{ev.price}</span> qty{" "}
+                              <span className="text-neutral-100">{ev.qty}</span>
+                            </div>
+                            <div className="text-neutral-500">seq {ev.accepted_seq}</div>
+                          </div>
+                        </div>
+                      );
+                    }
+
+                    // fill
+                    return (
+                      <div
+                        key={`f-${ev.maker_seq}-${ev.taker_seq}-${i}`}
+                        className="rounded-xl border border-neutral-800 bg-neutral-900 px-3 py-2 text-[11px]"
+                      >
+                        <div className="flex items-center justify-between">
+                          <div className="text-neutral-300">
+                            <span className="text-neutral-500">{fmtTime(ev.ts)}</span>{" "}
+                            · FILL px <span className="text-neutral-100">{ev.price}</span>{" "}
+                            qty <span className="text-neutral-100">{ev.qty}</span>
+                          </div>
+                          <div className="text-neutral-500">
+                            maker {ev.maker_seq} → taker {ev.taker_seq}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })
+                ) : (
+                  <div className="text-xs text-neutral-500">No events yet.</div>
+                )}
+              </div>
             </div>
+
+            {showDebug ? (
+              <div className="mt-5">
+                <div className="text-xs text-neutral-500">Last message</div>
+                <pre className="mt-2 max-h-56 overflow-auto rounded-xl border border-neutral-800 bg-neutral-950 p-3 text-[11px] text-neutral-300">
+                  {lastMsg || "—"}
+                </pre>
+              </div>
+            ) : null}
           </div>
         </div>
       </div>

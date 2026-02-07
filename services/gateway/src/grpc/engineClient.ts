@@ -4,12 +4,12 @@ import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 
 /**
- * Repo layout (from your screenshot):
+ * Repo layout:
  *   exchange-engine/
  *     proto/engine.proto
  *     services/gateway/src/grpc/engineClient.ts
  *
- * So from this file, go up 4 levels to repo root, then /proto/engine.proto
+ * From this file, go up 4 levels to repo root, then /proto/engine.proto
  */
 const PROTO_PATH = path.resolve(__dirname, "../../../../proto/engine.proto");
 
@@ -48,6 +48,18 @@ export type SubmitOrderInput = {
   client_order_id?: string;
 };
 
+export type Fill = {
+  maker_seq: string | number;
+  taker_seq: string | number;
+  price: string | number;
+  qty: string | number;
+};
+
+export type SubmitOrderOutput = {
+  accepted_seq: string | number;
+  fills: Fill[];
+};
+
 export type BookDepthLevel = {
   price: string | number;
   qty: string | number;
@@ -72,9 +84,7 @@ export async function health(): Promise<{ status: string }> {
   return unary<{}, { status: string }>(client.Health, {});
 }
 
-export async function submitOrder(
-  input: SubmitOrderInput
-): Promise<{ accepted_seq: string | number }> {
+export async function submitOrder(input: SubmitOrderInput): Promise<SubmitOrderOutput> {
   return unary<any, any>(client.SubmitOrder, {
     symbol: input.symbol,
     // proto enum Side will accept string names when enums: String is used
@@ -94,10 +104,6 @@ export async function getTopOfBook(symbol: string): Promise<{
   return unary<any, any>(client.GetTopOfBook, { symbol });
 }
 
-// NEW: GetBookDepth
-export async function getBookDepth(
-  symbol: string,
-  levels: number
-): Promise<BookDepth> {
+export async function getBookDepth(symbol: string, levels: number): Promise<BookDepth> {
   return unary<any, any>(client.GetBookDepth, { symbol, levels });
 }
