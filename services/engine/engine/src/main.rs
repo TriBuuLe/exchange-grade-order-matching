@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use tonic::{transport::Server, Request, Response, Status};
@@ -13,11 +13,43 @@ use engine::{
     SubmitOrderRequest, SubmitOrderResponse,
 };
 
-#[derive(Default)]
+#[derive(Debug, Default, Clone)]
+struct OrderBook {
+    // price -> total qty at that price
+    bids: BTreeMap<i64, u64>, // best bid = last_key_value()
+    asks: BTreeMap<i64, u64>, // best ask = first_key_value()
+}
+
+impl OrderBook {
+    fn add_bid(&mut self, price: i64, qty: u64) {
+        let e = self.bids.entry(price).or_insert(0);
+        *e = e.saturating_add(qty);
+    }
+
+    fn add_ask(&mut self, price: i64, qty: u64) {
+        let e = self.asks.entry(price).or_insert(0);
+        *e = e.saturating_add(qty);
+    }
+
+    fn top_of_book(&self) -> (i64, i64, i64, i64) {
+        // Return zeros when empty (matches your existing behavior)
+        let (bid_p, bid_q) = match self.bids.last_key_value() {
+            Some((p, q)) => (*p, (*q).min(i64::MAX as u64) as i64),
+            None => (0, 0),
+        };
+        let (ask_p, ask_q) = match self.asks.first_key_value() {
+            Some((p, q)) => (*p, (*q).min(i64::MAX as u64) as i64),
+            None => (0, 0),
+        };
+        (bid_p, bid_q, ask_p, ask_q)
+    }
+}
+
+#[derive(Debug, Default)]
 struct EngineState {
     seq: u64,
-    // symbol -> (best_bid_price, best_bid_qty, best_ask_price, best_ask_qty)
-    tob: HashMap<String, (i64, i64, i64, i64)>,
+    // symbol -> full price-level book
+    books: HashMap<String, OrderBook>,
 }
 
 #[derive(Clone)]
@@ -57,7 +89,7 @@ impl Engine for EngineSvc {
     ) -> Result<Response<SubmitOrderResponse>, Status> {
         let o = req.into_inner();
 
-        // Minimal validation (still no matching)
+        // Validation
         let symbol = o.symbol.trim().to_string();
         if symbol.is_empty() {
             return Err(Status::invalid_argument("symbol must be non-empty"));
@@ -73,25 +105,19 @@ impl Engine for EngineSvc {
         }
 
         let accepted_seq = self.with_state(|st| {
-            // assign seq
             let seq = Self::next_seq(st);
 
-            // update top-of-book (toy version, not full book)
-            let entry = st
-                .tob
-                .entry(symbol)
-                .or_insert((0, 0, 0, 0)); // (bidP, bidQ, askP, askQ)
+            // Get/create book for symbol
+            let book = st.books.entry(symbol).or_default();
+
+            // NOTE: still no matching. We just aggregate qty at price levels.
+            let qty_u = o.qty as u64;
+            let price_i = o.price;
 
             if o.side == Side::Buy as i32 {
-                let (bid_p, _bid_q, ask_p, ask_q) = *entry;
-                if bid_p == 0 || o.price > bid_p {
-                    *entry = (o.price, o.qty, ask_p, ask_q);
-                }
+                book.add_bid(price_i, qty_u);
             } else if o.side == Side::Sell as i32 {
-                let (bid_p, bid_q, ask_p, _ask_q) = *entry;
-                if ask_p == 0 || o.price < ask_p {
-                    *entry = (bid_p, bid_q, o.price, o.qty);
-                }
+                book.add_ask(price_i, qty_u);
             }
 
             seq
@@ -110,7 +136,10 @@ impl Engine for EngineSvc {
         }
 
         let (bid_p, bid_q, ask_p, ask_q) = self.with_state(|st| {
-            st.tob.get(&symbol).copied().unwrap_or((0, 0, 0, 0))
+            st.books
+                .get(&symbol)
+                .map(|b| b.top_of_book())
+                .unwrap_or((0, 0, 0, 0))
         });
 
         Ok(Response::new(GetTopOfBookResponse {

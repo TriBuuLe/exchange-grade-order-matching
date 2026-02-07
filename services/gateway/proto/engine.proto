@@ -1,0 +1,40 @@
+syntax = "proto3";
+package engine.v1;
+
+service Engine {
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc SubmitOrder(SubmitOrderRequest) returns (SubmitOrderResponse);
+  rpc GetTopOfBook(GetTopOfBookRequest) returns (GetTopOfBookResponse);
+}
+
+message HealthRequest {}
+message HealthResponse { string status = 1; }
+
+enum Side {
+  SIDE_UNSPECIFIED = 0;
+  BUY = 1;
+  SELL = 2;
+}
+
+message SubmitOrderRequest {
+  string symbol = 1;
+  Side side = 2;
+  int64 price = 3;
+  int64 qty = 4;
+  string client_order_id = 5;
+}
+
+message SubmitOrderResponse {
+  uint64 accepted_seq = 1;
+}
+
+message GetTopOfBookRequest {
+  string symbol = 1;
+}
+
+message GetTopOfBookResponse {
+  int64 best_bid_price = 1;
+  int64 best_bid_qty = 2;
+  int64 best_ask_price = 3;
+  int64 best_ask_qty = 4;
+}
