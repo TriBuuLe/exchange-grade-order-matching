@@ -2,7 +2,7 @@ import "dotenv/config";
 import express from "express";
 import http from "http";
 import attachWs from "./ws/server";
-import { getTopOfBook, submitOrder, health } from "./grpc/engineClient";
+import { getTopOfBook, getBookDepth, submitOrder, health } from "./grpc/engineClient";
 
 const app = express();
 console.log("[gateway] ENABLE_ORDERS =", process.env.ENABLE_ORDERS);
@@ -62,6 +62,40 @@ app.get("/tob", async (req, res) => {
     }
 
     const out = await getTopOfBook(symbol);
+    return res.json(out);
+  } catch (e: any) {
+    return res.status(400).json({
+      ok: false,
+      error: e?.message ?? String(e),
+      code: e?.code,
+      details: e?.details,
+    });
+  }
+});
+// GET /depth?symbol=BTC-USD&levels=10 -> Engine.GetBookDepth (gRPC)
+app.get("/depth", async (req, res) => {
+  try {
+    const symbol = String(req.query.symbol ?? "").trim();
+    const levelsRaw = String(req.query.levels ?? "").trim();
+
+    if (!symbol) {
+      return res.status(400).json({
+        ok: false,
+        error: "MISSING_SYMBOL",
+        message: "Provide ?symbol=BTC-USD",
+      });
+    }
+
+    const levels = levelsRaw ? Number(levelsRaw) : 10;
+    if (!Number.isFinite(levels) || levels <= 0) {
+      return res.status(400).json({
+        ok: false,
+        error: "INVALID_LEVELS",
+        message: "Provide ?levels=10 (positive number)",
+      });
+    }
+
+    const out = await getBookDepth(symbol, levels);
     return res.json(out);
   } catch (e: any) {
     return res.status(400).json({

@@ -1,5 +1,9 @@
-use std::collections::{BTreeMap, HashMap};
+mod order_book;
+
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+
+use order_book::{Order, OrderBook, Side as BookSide};
 
 use tonic::{transport::Server, Request, Response, Status};
 
@@ -9,46 +13,14 @@ pub mod engine {
 
 use engine::engine_server::{Engine, EngineServer};
 use engine::{
-    GetTopOfBookRequest, GetTopOfBookResponse, HealthRequest, HealthResponse, Side,
-    SubmitOrderRequest, SubmitOrderResponse,
+    GetBookDepthRequest, GetBookDepthResponse, GetTopOfBookRequest, GetTopOfBookResponse,
+    HealthRequest, HealthResponse, PriceLevel, Side, SubmitOrderRequest, SubmitOrderResponse,
 };
-
-#[derive(Debug, Default, Clone)]
-struct OrderBook {
-    // price -> total qty at that price
-    bids: BTreeMap<i64, u64>, // best bid = last_key_value()
-    asks: BTreeMap<i64, u64>, // best ask = first_key_value()
-}
-
-impl OrderBook {
-    fn add_bid(&mut self, price: i64, qty: u64) {
-        let e = self.bids.entry(price).or_insert(0);
-        *e = e.saturating_add(qty);
-    }
-
-    fn add_ask(&mut self, price: i64, qty: u64) {
-        let e = self.asks.entry(price).or_insert(0);
-        *e = e.saturating_add(qty);
-    }
-
-    fn top_of_book(&self) -> (i64, i64, i64, i64) {
-        // Return zeros when empty (matches your existing behavior)
-        let (bid_p, bid_q) = match self.bids.last_key_value() {
-            Some((p, q)) => (*p, (*q).min(i64::MAX as u64) as i64),
-            None => (0, 0),
-        };
-        let (ask_p, ask_q) = match self.asks.first_key_value() {
-            Some((p, q)) => (*p, (*q).min(i64::MAX as u64) as i64),
-            None => (0, 0),
-        };
-        (bid_p, bid_q, ask_p, ask_q)
-    }
-}
 
 #[derive(Debug, Default)]
 struct EngineState {
     seq: u64,
-    // symbol -> full price-level book
+    // symbol -> full price-level book (real FIFO order book)
     books: HashMap<String, OrderBook>,
 }
 
@@ -104,21 +76,28 @@ impl Engine for EngineSvc {
             return Err(Status::invalid_argument("side must be BUY or SELL"));
         }
 
+        let client_order_id = o.client_order_id.trim().to_string();
+
         let accepted_seq = self.with_state(|st| {
             let seq = Self::next_seq(st);
 
+            let side = if o.side == Side::Buy as i32 {
+                BookSide::Buy
+            } else {
+                BookSide::Sell
+            };
+
             // Get/create book for symbol
-            let book = st.books.entry(symbol).or_default();
+            let book = st.books.entry(symbol).or_insert_with(OrderBook::new);
 
-            // NOTE: still no matching. We just aggregate qty at price levels.
-            let qty_u = o.qty as u64;
-            let price_i = o.price;
-
-            if o.side == Side::Buy as i32 {
-                book.add_bid(price_i, qty_u);
-            } else if o.side == Side::Sell as i32 {
-                book.add_ask(price_i, qty_u);
-            }
+            // v1: NO MATCHING. We just rest orders into FIFO price levels.
+            book.add(Order {
+                seq,
+                side,
+                price: o.price,
+                qty: o.qty,
+                client_order_id,
+            });
 
             seq
         });
@@ -148,6 +127,57 @@ impl Engine for EngineSvc {
             best_ask_price: ask_p,
             best_ask_qty: ask_q,
         }))
+    }
+
+    async fn get_book_depth(
+        &self,
+        req: Request<GetBookDepthRequest>,
+    ) -> Result<Response<GetBookDepthResponse>, Status> {
+        let r = req.into_inner();
+        let symbol = r.symbol.trim().to_string();
+        if symbol.is_empty() {
+            return Err(Status::invalid_argument("symbol must be non-empty"));
+        }
+
+        // default: 10 levels if not provided or invalid
+        let mut levels: usize = if r.levels <= 0 { 10 } else { r.levels as usize };
+        if levels > 100 {
+            levels = 100; // hard cap to keep response bounded
+        }
+
+        let (bids, asks) = self.with_state(|st| {
+            let book = match st.books.get(&symbol) {
+                Some(b) => b,
+                None => return (Vec::new(), Vec::new()),
+            };
+
+            // bids: best -> worse (highest -> lower)
+            let bids_out: Vec<PriceLevel> = book
+                .bids
+                .iter()
+                .rev()
+                .take(levels)
+                .map(|(price, q)| PriceLevel {
+                    price: *price,
+                    qty: q.iter().map(|o| o.qty).sum::<i64>(),
+                })
+                .collect();
+
+            // asks: best -> worse (lowest -> higher)
+            let asks_out: Vec<PriceLevel> = book
+                .asks
+                .iter()
+                .take(levels)
+                .map(|(price, q)| PriceLevel {
+                    price: *price,
+                    qty: q.iter().map(|o| o.qty).sum::<i64>(),
+                })
+                .collect();
+
+            (bids_out, asks_out)
+        });
+
+        Ok(Response::new(GetBookDepthResponse { bids, asks }))
     }
 }
 

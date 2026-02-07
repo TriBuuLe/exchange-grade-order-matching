@@ -9,19 +9,28 @@ type TopOfBook = {
   best_ask_qty: string;
 };
 
+type DepthLevel = { price: string; qty: string };
+type BookDepth = { bids: DepthLevel[]; asks: DepthLevel[] };
+
+// Keep these types for future WS (we're not deleting them)
 type WsHello = { type: "hello"; msg: string };
 type WsSubscribed = { type: "subscribed"; symbol: string };
 type WsTopOfBook = { type: "top_of_book"; symbol: string; data: TopOfBook };
 type WsError = { type: "error"; error: string };
 type WsMsg = WsHello | WsSubscribed | WsTopOfBook | WsError;
 
+// Prefer env var (correct), fallback to same-host dev behavior
 function gatewayBaseUrl() {
+  const env = process.env.NEXT_PUBLIC_GATEWAY_HTTP;
+  if (env && env.trim()) return env.trim();
+
   if (typeof window === "undefined") return "http://localhost:8080";
   const host = window.location.hostname;
   const proto = window.location.protocol; // http: or https:
   return `${proto}//${host}:8080`;
 }
 
+// Keep wsUrl for future; for now UI uses REST polling (no WS server required)
 function wsUrl() {
   if (typeof window === "undefined") return "ws://localhost:8080/ws";
   const host = window.location.hostname;
@@ -30,14 +39,20 @@ function wsUrl() {
 }
 
 export default function Page() {
-  // market / ws
+  // market / "ws" status (now reflects polling connectivity)
   const [symbol, setSymbol] = useState("BTC-USD");
   const [status, setStatus] = useState<"disconnected" | "connecting" | "connected">(
     "disconnected"
   );
   const [tob, setTob] = useState<TopOfBook | null>(null);
+  const [depth, setDepth] = useState<BookDepth | null>(null);
   const [lastMsg, setLastMsg] = useState<string>("");
+
+  // Keep WS ref for later (not used in v0)
   const wsRef = useRef<WebSocket | null>(null);
+
+  // Polling timer ref (v0)
+  const pollRef = useRef<number | null>(null);
 
   // order entry
   const [side, setSide] = useState<"BUY" | "SELL">("BUY");
@@ -55,7 +70,51 @@ export default function Page() {
     return ask - bid;
   }, [bid, ask, tob]);
 
+  async function fetchTopOfBook(sym: string) {
+    const base = gatewayBaseUrl();
+    const url = `${base}/tob?symbol=${encodeURIComponent(sym)}`;
+
+    const res = await fetch(url, { cache: "no-store" });
+    const text = await res.text();
+
+    // keep lastMsg as debug (what the gateway returned)
+    setLastMsg(text);
+
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}: ${text}`);
+    }
+
+    const data = JSON.parse(text) as TopOfBook;
+    setTob(data);
+  }
+
+  async function fetchDepth(sym: string, levels: number) {
+    const base = gatewayBaseUrl();
+    const url = `${base}/depth?symbol=${encodeURIComponent(sym)}&levels=${levels}`;
+
+    const res = await fetch(url, { cache: "no-store" });
+    const text = await res.text();
+
+    // keep lastMsg useful for debugging; depth will overwrite it as well
+    setLastMsg(text);
+
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}: ${text}`);
+    }
+
+    const data = JSON.parse(text) as BookDepth;
+    setDepth(data);
+  }
+
   function connectAndSubscribe(sym: string) {
+    // v0: REST polling, not WebSockets
+    // clean up any old poll
+    if (pollRef.current) {
+      window.clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+
+    // if any old ws exists, close it (future-proof)
     if (wsRef.current) {
       wsRef.current.close();
       wsRef.current = null;
@@ -64,32 +123,35 @@ export default function Page() {
     setStatus("connecting");
     setLastMsg("");
 
-    const ws = new WebSocket(wsUrl());
-    wsRef.current = ws;
+    const s = sym.trim();
+    if (!s) {
+      setStatus("disconnected");
+      setTob(null);
+      setDepth(null);
+      setLastMsg(`{"error":"symbol is required"}`);
+      return;
+    }
 
-    ws.onopen = () => {
-      setStatus("connected");
-      ws.send(JSON.stringify({ type: "subscribe", symbol: sym }));
-    };
+    // immediate fetch, then poll
+    Promise.all([fetchTopOfBook(s), fetchDepth(s, 10)])
+      .then(() => setStatus("connected"))
+      .catch((e: any) => {
+        setStatus("disconnected");
+        setTob(null);
+        setDepth(null);
+        setLastMsg(`{"error":"${e?.message ?? String(e)}"}`);
+      });
 
-    ws.onmessage = (ev) => {
-      const text = String(ev.data);
-      setLastMsg(text);
-
-      let msg: WsMsg;
-      try {
-        msg = JSON.parse(text) as WsMsg;
-      } catch {
-        return;
-      }
-
-      if (msg.type === "top_of_book") {
-        setTob(msg.data);
-      }
-    };
-
-    ws.onclose = () => setStatus("disconnected");
-    ws.onerror = () => setStatus("disconnected");
+    pollRef.current = window.setInterval(() => {
+      Promise.all([fetchTopOfBook(s), fetchDepth(s, 10)])
+        .then(() => setStatus("connected"))
+        .catch((e: any) => {
+          setStatus("disconnected");
+          setTob(null);
+          setDepth(null);
+          setLastMsg(`{"error":"${e?.message ?? String(e)}"}`);
+        });
+    }, 1000);
   }
 
   async function submitOrder() {
@@ -146,7 +208,9 @@ export default function Page() {
 
   useEffect(() => {
     connectAndSubscribe(symbol);
+
     return () => {
+      if (pollRef.current) window.clearInterval(pollRef.current);
       if (wsRef.current) wsRef.current.close();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -159,7 +223,7 @@ export default function Page() {
           <div>
             <h1 className="text-2xl font-semibold tracking-tight">Exchange UI</h1>
             <p className="mt-1 text-sm text-neutral-400">
-              Live Top-of-Book + Order Entry via Gateway
+              Live Top-of-Book + Depth + Order Entry via Gateway
             </p>
           </div>
 
@@ -191,6 +255,7 @@ export default function Page() {
                 Symbol
               </label>
               <input
+                suppressHydrationWarning
                 value={symbol}
                 onChange={(e) => setSymbol(e.target.value)}
                 className="mt-2 w-full rounded-xl border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-neutral-700"
@@ -205,7 +270,22 @@ export default function Page() {
               </button>
 
               <p className="mt-3 text-[11px] text-neutral-500">
-                WS: <span className="text-neutral-300">{wsUrl()}</span>
+                REST:{" "}
+                <span className="text-neutral-300">
+                  {gatewayBaseUrl()}/tob?symbol=...
+                </span>
+              </p>
+
+              <p className="mt-1 text-[11px] text-neutral-500">
+                REST:{" "}
+                <span className="text-neutral-300">
+                  {gatewayBaseUrl()}/depth?symbol=...&levels=10
+                </span>
+              </p>
+
+              {/* Keep WS line for future, but it's not used in v0 */}
+              <p className="mt-1 text-[11px] text-neutral-500">
+                WS (later): <span className="text-neutral-300">{wsUrl()}</span>
               </p>
             </div>
 
@@ -269,7 +349,7 @@ export default function Page() {
             </div>
           </div>
 
-          {/* Right: TOB + debug */}
+          {/* Right: TOB + depth + debug */}
           <div className="lg:col-span-3 rounded-2xl border border-neutral-800 bg-neutral-900 p-5">
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-semibold text-neutral-200">Top of Book</h2>
@@ -303,8 +383,56 @@ export default function Page() {
               </div>
             </div>
 
+            {/* Depth (L2) */}
+            <div className="mt-5 rounded-2xl border border-neutral-800 bg-neutral-950 p-4">
+              <div className="flex items-center justify-between">
+                <div className="text-sm font-semibold text-neutral-200">Depth (L2)</div>
+                <div className="text-xs text-neutral-500">Top 10 levels</div>
+              </div>
+
+              <div className="mt-4 grid grid-cols-2 gap-4">
+                {/* Bids */}
+                <div>
+                  <div className="mb-2 text-xs font-medium text-neutral-400">Bids</div>
+                  <div className="space-y-1">
+                    {(depth?.bids ?? []).map((lvl) => (
+                      <div
+                        key={`b-${lvl.price}`}
+                        className="flex items-center justify-between rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-xs"
+                      >
+                        <span className="text-neutral-200">{lvl.price}</span>
+                        <span className="text-neutral-400">{lvl.qty}</span>
+                      </div>
+                    ))}
+                    {!depth?.bids?.length ? (
+                      <div className="text-xs text-neutral-500">—</div>
+                    ) : null}
+                  </div>
+                </div>
+
+                {/* Asks */}
+                <div>
+                  <div className="mb-2 text-xs font-medium text-neutral-400">Asks</div>
+                  <div className="space-y-1">
+                    {(depth?.asks ?? []).map((lvl) => (
+                      <div
+                        key={`a-${lvl.price}`}
+                        className="flex items-center justify-between rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-xs"
+                      >
+                        <span className="text-neutral-200">{lvl.price}</span>
+                        <span className="text-neutral-400">{lvl.qty}</span>
+                      </div>
+                    ))}
+                    {!depth?.asks?.length ? (
+                      <div className="text-xs text-neutral-500">—</div>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <div className="mt-5">
-              <div className="text-xs text-neutral-500">Last WS message</div>
+              <div className="text-xs text-neutral-500">Last message</div>
               <pre className="mt-2 max-h-56 overflow-auto rounded-xl border border-neutral-800 bg-neutral-950 p-3 text-[11px] text-neutral-300">
                 {lastMsg || "—"}
               </pre>

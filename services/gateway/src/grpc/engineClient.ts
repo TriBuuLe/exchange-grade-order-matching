@@ -26,14 +26,14 @@ const loaded = grpc.loadPackageDefinition(packageDef) as any;
 // From proto: package engine.v1; service Engine { ... }
 const EngineService = loaded?.engine?.v1?.Engine;
 if (!EngineService) {
-  throw new Error("gRPC service not found at loaded.engine.v1.Engine (check proto path/package/service)");
+  throw new Error(
+    "gRPC service not found at loaded.engine.v1.Engine (check proto path/package/service)"
+  );
 }
 
 // Prefer ENGINE_GRPC_ADDR, fallback to ENGINE_ADDR for compatibility
 const ENGINE_ADDR =
-  process.env.ENGINE_GRPC_ADDR ??
-  process.env.ENGINE_ADDR ??
-  "127.0.0.1:50051";
+  process.env.ENGINE_GRPC_ADDR ?? process.env.ENGINE_ADDR ?? "127.0.0.1:50051";
 
 const client = new EngineService(ENGINE_ADDR, grpc.credentials.createInsecure());
 
@@ -46,6 +46,16 @@ export type SubmitOrderInput = {
   price: number;
   qty: number;
   client_order_id?: string;
+};
+
+export type BookDepthLevel = {
+  price: string | number;
+  qty: string | number;
+};
+
+export type BookDepth = {
+  bids: BookDepthLevel[];
+  asks: BookDepthLevel[];
 };
 
 function unary<TReq, TRes>(method: Function, req: TReq): Promise<TRes> {
@@ -62,7 +72,9 @@ export async function health(): Promise<{ status: string }> {
   return unary<{}, { status: string }>(client.Health, {});
 }
 
-export async function submitOrder(input: SubmitOrderInput): Promise<{ accepted_seq: string | number }> {
+export async function submitOrder(
+  input: SubmitOrderInput
+): Promise<{ accepted_seq: string | number }> {
   return unary<any, any>(client.SubmitOrder, {
     symbol: input.symbol,
     // proto enum Side will accept string names when enums: String is used
@@ -80,4 +92,12 @@ export async function getTopOfBook(symbol: string): Promise<{
   best_ask_qty: string | number;
 }> {
   return unary<any, any>(client.GetTopOfBook, { symbol });
+}
+
+// NEW: GetBookDepth
+export async function getBookDepth(
+  symbol: string,
+  levels: number
+): Promise<BookDepth> {
+  return unary<any, any>(client.GetBookDepth, { symbol, levels });
 }
