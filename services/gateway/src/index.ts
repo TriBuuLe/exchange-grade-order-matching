@@ -1,3 +1,5 @@
+// services/gateway/src/index.ts
+
 import "dotenv/config";
 import express from "express";
 import http from "http";
@@ -7,6 +9,7 @@ import {
   getBookDepth,
   submitOrder,
   health,
+  getRecentTrades,
 } from "./grpc/engineClient";
 
 const app = express();
@@ -34,6 +37,30 @@ app.use((req, res, next) => {
 });
 
 app.use(express.json({ limit: "1mb" }));
+
+function parseIntervalToMs(s: string): number | null {
+  const v = String(s ?? "").trim().toLowerCase();
+  const map: Record<string, number> = {
+    "1s": 1_000,
+    "5s": 5_000,
+    "10s": 10_000,
+    "30s": 30_000,
+    "1m": 60_000,
+    "5m": 300_000,
+    "15m": 900_000,
+    "1h": 3_600_000,
+  };
+  return map[v] ?? null;
+}
+
+type Candle = {
+  ts: number; // bucket start time (ms)
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number; // sum qty
+};
 
 // GET /health -> Engine.Health (gRPC)
 app.get("/health", async (_req, res) => {
@@ -103,6 +130,100 @@ app.get("/depth", async (req, res) => {
 
     const out = await getBookDepth(symbol, levels);
     return res.json(out);
+  } catch (e: any) {
+    return res.status(400).json({
+      ok: false,
+      error: e?.message ?? String(e),
+      code: e?.code,
+      details: e?.details,
+    });
+  }
+});
+
+// GET /candles?symbol=BTC-USD&interval=1s&limit=300
+app.get("/candles", async (req, res) => {
+  try {
+    const symbol = String(req.query.symbol ?? "").trim();
+    if (!symbol) {
+      return res.status(400).json({
+        ok: false,
+        error: "MISSING_SYMBOL",
+        message: "Provide ?symbol=BTC-USD",
+      });
+    }
+
+    const intervalRaw = String(req.query.interval ?? "1s");
+    const intervalMs = parseIntervalToMs(intervalRaw);
+    if (!intervalMs) {
+      return res.status(400).json({
+        ok: false,
+        error: "INVALID_INTERVAL",
+        message: "Use interval=1s|5s|10s|30s|1m|5m|15m|1h",
+      });
+    }
+
+    const limitRaw = String(req.query.limit ?? "300").trim();
+    let limit = Number(limitRaw);
+    if (!Number.isFinite(limit) || limit <= 0) limit = 300;
+    if (limit > 2000) limit = 2000; // keep response bounded
+
+    // Pull recent trades from engine (most recent N, capped by engine)
+    // We request a lot so candles can fill; if there aren't enough trades, you'll get fewer candles.
+    const tradeRes = await getRecentTrades(symbol, 0, 1000);
+    const trades = tradeRes.trades ?? [];
+
+    // Expect ts_ms from engine (proto field becomes tsMs in JS with keepCase:true? actually keepCase:true keeps ts_ms)
+    // But ws server uses t.ts_ms, so we support both for safety.
+    const normalized = trades
+      .map((t: any) => {
+        const ts = Number(t.ts_ms ?? t.tsMs ?? 0);
+        const price = Number(t.price);
+        const qty = Number(t.qty);
+        if (!Number.isFinite(ts) || ts <= 0) return null;
+        if (!Number.isFinite(price)) return null;
+        if (!Number.isFinite(qty)) return null;
+        return { ts, price, qty };
+      })
+      .filter(Boolean) as Array<{ ts: number; price: number; qty: number }>;
+
+    // Sort ascending by time to build candles deterministically
+    normalized.sort((a, b) => a.ts - b.ts);
+
+    const buckets = new Map<number, Candle>();
+
+    for (const tr of normalized) {
+      const bucketStart = Math.floor(tr.ts / intervalMs) * intervalMs;
+      const c = buckets.get(bucketStart);
+      if (!c) {
+        buckets.set(bucketStart, {
+          ts: bucketStart,
+          open: tr.price,
+          high: tr.price,
+          low: tr.price,
+          close: tr.price,
+          volume: tr.qty,
+        });
+      } else {
+        c.high = Math.max(c.high, tr.price);
+        c.low = Math.min(c.low, tr.price);
+        c.close = tr.price;
+        c.volume += tr.qty;
+      }
+    }
+
+    const out = Array.from(buckets.values()).sort((a, b) => a.ts - b.ts);
+
+    // Keep only last `limit` candles
+    const sliced = out.slice(-limit);
+
+    return res.json({
+      ok: true,
+      symbol,
+      interval: intervalRaw,
+      interval_ms: intervalMs,
+      count: sliced.length,
+      candles: sliced,
+    });
   } catch (e: any) {
     return res.status(400).json({
       ok: false,

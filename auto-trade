@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BASE="${BASE:-http://localhost:8080}"
+SYM="${SYM:-BTC-USD}"
+T="${T:-60}"
+
+MID="${MID:-900}"
+MU="${MU:-900}"
+
+KAPPA_BPS="${KAPPA_BPS:-80}"
+
+SIGMA="${SIGMA:-18}"
+JUMP_PCT="${JUMP_PCT:-6}"
+JUMP_MIN="${JUMP_MIN:-60}"
+JUMP_MAX="${JUMP_MAX:-220}"
+
+BASE_SPREAD="${BASE_SPREAD:-6}"
+SPREAD_JITTER="${SPREAD_JITTER:-6}"
+LEVELS="${LEVELS:-10}"
+LEVEL_STEP="${LEVEL_STEP:-2}"
+SEED_Q_MIN="${SEED_Q_MIN:-4}"
+SEED_Q_MAX="${SEED_Q_MAX:-30}"
+
+PRINTS="${PRINTS:-14}"
+TAKER_Q_MIN="${TAKER_Q_MIN:-1}"
+TAKER_Q_MAX="${TAKER_Q_MAX:-12}"
+
+post() {
+  local side="$1" price="$2" qty="$3"
+  curl -s -X POST "$BASE/orders" \
+    -H "Content-Type: application/json" \
+    -d "{\"symbol\":\"$SYM\",\"side\":\"$side\",\"price\":$price,\"qty\":$qty}" >/dev/null
+}
+
+rand_range() { local a="$1" b="$2"; echo $(( a + RANDOM % (b - a + 1) )); }
+coin() { local pct="$1"; local r=$(( RANDOM % 100 )); (( r < pct )) && echo 1 || echo 0; }
+
+echo "Random-market sim for $SYM ($T sec) at $BASE"
+
+for sec in $(seq 1 "$T"); do
+  noise=$(rand_range $((-SIGMA)) "$SIGMA")
+  drift=$(( (MU - MID) * KAPPA_BPS / 10000 ))
+
+  if [[ "$(coin "$JUMP_PCT")" == "1" ]]; then
+    jmag=$(rand_range "$JUMP_MIN" "$JUMP_MAX")
+    jdir=$(( (RANDOM % 2) == 0 ? -1 : 1 ))
+    noise=$(( noise + jdir * jmag ))
+  fi
+
+  MID=$(( MID + drift + noise ))
+  (( MID < 50 )) && MID=50
+
+  half=$(( BASE_SPREAD + (RANDOM % (SPREAD_JITTER + 1)) ))
+  bid0=$(( MID - half ))
+  ask0=$(( MID + half ))
+
+  for lvl in $(seq 0 $((LEVELS-1))); do
+    q=$(rand_range "$SEED_Q_MIN" "$SEED_Q_MAX")
+    post "BUY"  "$((bid0 - lvl*LEVEL_STEP))" "$q" &
+    post "SELL" "$((ask0 + lvl*LEVEL_STEP))" "$q" &
+  done
+  wait
+
+  sleep 1
+done
+
+echo "Done."

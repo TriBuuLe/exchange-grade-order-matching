@@ -81,6 +81,8 @@ message Trade {
   uint64 maker_seq = 5;
   uint64 taker_seq = 6;
   Side taker_side = 7;   // BUY or SELL (who initiated)
+  int64 ts_ms = 8;       // unix epoch milliseconds
+
 }
 
 message GetRecentTradesRequest {

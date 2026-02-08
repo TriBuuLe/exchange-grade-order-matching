@@ -5,6 +5,9 @@ import { getTopOfBook, getRecentTrades } from "../grpc/engineClient";
 type ClientState = {
   ws: WebSocket;
   symbol: string | null;
+
+  // Per-client cursor: the last trade_id this specific socket has seen
+  lastTradeId: number;
 };
 
 type SubscribeMsg = {
@@ -28,11 +31,8 @@ export function attachWs(server: http.Server) {
   // Track last TOB payload sent per socket to avoid duplicate pushes
   const lastSentTob = new WeakMap<WebSocket, string>();
 
-  // Track last trade_id seen per symbol
-  const lastTradeIdBySymbol = new Map<string, number>();
-
   wss.on("connection", (ws) => {
-    clients.set(ws, { ws, symbol: null });
+    clients.set(ws, { ws, symbol: null, lastTradeId: 0 });
 
     ws.send(JSON.stringify({ type: "hello", msg: "connected" }));
 
@@ -53,10 +53,10 @@ export function attachWs(server: http.Server) {
       // Force immediate TOB push on next tick
       lastSentTob.delete(ws);
 
-      // Initialize trade cursor for this symbol if needed
-      if (!lastTradeIdBySymbol.has(msg.symbol)) {
-        lastTradeIdBySymbol.set(msg.symbol, 0);
-      }
+      // IMPORTANT: per-client trade cursor.
+      st.lastTradeId = 0;
+
+      console.log(`[ws] subscribed symbol=${msg.symbol}`);
 
       ws.send(JSON.stringify({ type: "subscribed", symbol: msg.symbol }));
     });
@@ -75,7 +75,7 @@ export function attachWs(server: http.Server) {
     }
     if (symbols.size === 0) return;
 
-    // ---- Top of book polling ----
+    // ---- Top of book polling (per-symbol, shared) ----
     const tobBySymbol = new Map<string, any>();
     for (const sym of symbols) {
       try {
@@ -103,30 +103,47 @@ export function attachWs(server: http.Server) {
       }
     }
 
-    // ---- Trade polling ----
-    for (const sym of symbols) {
-      const after = lastTradeIdBySymbol.get(sym) ?? 0;
+    // ---- Trade polling (per-client cursor) ----
+    for (const st of clients.values()) {
+      if (!st.symbol) continue;
+      if (st.ws.readyState !== WebSocket.OPEN) continue;
+
+      const sym = st.symbol;
+      const after = st.lastTradeId;
 
       try {
         const res = await getRecentTrades(sym, after, 100);
         const trades = res.trades ?? [];
         if (trades.length === 0) continue;
 
-        lastTradeIdBySymbol.set(sym, Number(res.last_trade_id));
+        // advance THIS client's cursor
+        st.lastTradeId = Number(res.last_trade_id);
 
-        const msg = JSON.stringify({
-          type: "trades",
-          symbol: sym,
-          trades,
-        });
+        // Forward engine timestamp: ts_ms -> ts (epoch ms)
+        const tradesOut = trades.map((t: any) => ({
+          trade_id: String(t.trade_id),
+          symbol: String(t.symbol),
+          price: String(t.price),
+          qty: String(t.qty),
+          maker_seq: String(t.maker_seq),
+          taker_seq: String(t.taker_seq),
+          taker_side: t.taker_side,
+          ts: Number(t.ts_ms ?? 0),
+        }));
 
-        for (const st of clients.values()) {
-          if (st.symbol !== sym) continue;
-          if (st.ws.readyState !== WebSocket.OPEN) continue;
-          st.ws.send(msg);
-        }
-      } catch {
-        // ignore trade poll errors
+        console.log(
+          `[ws] send trades symbol=${sym} count=${tradesOut.length} after=${after} last=${st.lastTradeId}`
+        );
+
+        st.ws.send(
+          JSON.stringify({
+            type: "trades",
+            symbol: sym,
+            trades: tradesOut,
+          })
+        );
+      } catch (e: any) {
+        console.log(`[ws] trade poll error symbol=${sym}: ${e?.message ?? String(e)}`);
       }
     }
   }, 100);

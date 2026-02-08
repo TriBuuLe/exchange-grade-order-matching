@@ -8,6 +8,7 @@ import TopOfBookCard from "../components/TopOfBookCard";
 import DepthCard from "../components/DepthCard";
 import TradeTapeCard from "../components/TradeTapeCard";
 import DebugPanel from "../components/DebugPanel";
+import PriceChartCard from "../components/PriceChartCard";
 
 type TopOfBook = {
   best_bid_price: string;
@@ -41,6 +42,8 @@ type WsTrade = {
   maker_seq: string;
   taker_seq: string;
   taker_side: "BUY" | "SELL";
+  // Gateway SHOULD send this. If missing, we fallback to receipt time.
+  ts?: number;
 };
 
 type WsTradeWithTs = WsTrade & { ts: number };
@@ -234,15 +237,27 @@ export default function Page() {
           if (String(m.symbol).trim() !== s.trim()) return;
           if (!Array.isArray(m.trades)) return;
 
-          const now = Date.now();
+          const receiptNow = Date.now();
+
           const withTs: WsTradeWithTs[] = m.trades.map((t) => ({
             ...t,
-            ts: now,
+            ts: typeof t.ts === "number" ? t.ts : receiptNow,
           }));
 
           setTrades((prev) => {
-            const merged = [...prev, ...withTs];
-            return merged.slice(-50);
+            // Dedupe by trade_id (critical for reconnect/reload)
+            const seen = new Set(prev.map((x) => x.trade_id));
+            const next: WsTradeWithTs[] = [...prev];
+
+            for (const t of withTs) {
+              if (!t.trade_id) continue;
+              if (seen.has(t.trade_id)) continue;
+              seen.add(t.trade_id);
+              next.push(t);
+            }
+
+            // Keep last 50
+            return next.slice(-50);
           });
         }
       };
@@ -344,6 +359,10 @@ export default function Page() {
           showDebug={showDebug}
           onToggleDebug={() => setShowDebug((v) => !v)}
         />
+        <div className="mt-8">
+          <PriceChartCard symbol={symbol} gatewayBaseUrl={gatewayBaseUrl} />
+        </div>
+
 
         <div className="mt-8 grid gap-6 lg:grid-cols-5">
           {/* Left: controls */}
@@ -379,7 +398,7 @@ export default function Page() {
             <TopOfBookCard tob={tob} spread={spread} />
 
             <DepthCard depth={depth} />
-
+            
             <TradeTapeCard
               fmtTime={fmtTime}
               events={trades.map((t) => ({

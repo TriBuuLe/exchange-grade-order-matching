@@ -188,6 +188,12 @@ impl Engine for EngineSvc {
                     Side::Sell
                 };
 
+                // NEW: stable server-side timestamp in ms since epoch
+                let ts_ms: i64 = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64;
+
                 let trade = Trade {
                     trade_id,
                     symbol: symbol.clone(),
@@ -196,6 +202,7 @@ impl Engine for EngineSvc {
                     maker_seq: f.maker_seq,
                     taker_seq: f.taker_seq,
                     taker_side: taker_side as i32,
+                    ts_ms, // <--- NEW FIELD
                 };
 
                 Self::append_trade(st, &symbol, trade);

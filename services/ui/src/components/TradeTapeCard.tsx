@@ -39,7 +39,7 @@ export default function TradeTapeCard({ events, fmtTime }: Props) {
     <div className="rounded-2xl border border-neutral-800 bg-neutral-950 p-4">
       <div className="flex items-center justify-between">
         <div className="text-sm font-semibold text-neutral-200">Trade Tape</div>
-        <div className="text-xs text-neutral-500">Last 30 events</div>
+        <div className="text-xs text-neutral-500">Last 50 events</div>
       </div>
 
       <div className="mt-3 max-h-64 overflow-auto space-y-2">
