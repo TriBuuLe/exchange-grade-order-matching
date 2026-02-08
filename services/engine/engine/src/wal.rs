@@ -3,7 +3,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
-use crate::order_book::{Order, OrderBook, Side as BookSide};
+use crate::order_book::{Order, OrderBook, RestingOrder, Side as BookSide};
 use crate::EngineState;
 
 /// One WAL line = one accepted order.
@@ -31,7 +31,9 @@ pub struct Snapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotBook {
     pub symbol: String,
-    pub bids: Vec<Order>, // already resting FIFO order list grouped by price via OrderBook::add()
+    // Snapshot stores RESTING orders in FIFO order grouped by price-level in OrderBook.
+    // We serialize as `Order` for compatibility, where `qty` represents remaining qty at snapshot time.
+    pub bids: Vec<Order>,
     pub asks: Vec<Order>,
 }
 
@@ -175,8 +177,7 @@ impl Wal {
     /// Replay snapshot (if present) + WAL entries after snapshot seq into EngineState.
     /// Sets st.seq to max seq observed so new orders continue monotonically.
     ///
-    /// Returns ONLY the WAL applied count (kept for backward compatibility).
-    /// Same restore, but returns snapshot + WAL stats for clean startup logging.
+    /// Returns restore stats for clean startup logging.
     pub fn replay_into_with_stats(&self, st: &mut EngineState) -> io::Result<RestoreStats> {
         // 1) load snapshot if present
         let mut snapshot_present = false;
@@ -282,14 +283,22 @@ impl Wal {
 
 // ---- Helpers ----
 
-fn flatten_side(levels: &std::collections::BTreeMap<i64, std::collections::VecDeque<Order>>) -> Vec<Order> {
-    // Keep deterministic order:
+fn flatten_side(levels: &std::collections::BTreeMap<i64, std::collections::VecDeque<RestingOrder>>) -> Vec<Order> {
+    // Deterministic order:
     // - iterate price levels in ascending price order (BTreeMap iter)
     // - within each level, FIFO order (VecDeque front -> back)
+    //
+    // Snapshot serializes as `Order` for compatibility; `qty` stores remaining qty.
     let mut out = Vec::new();
     for (_price, q) in levels.iter() {
-        for o in q.iter() {
-            out.push(o.clone());
+        for ro in q.iter() {
+            out.push(Order {
+                seq: ro.seq,
+                side: ro.side,
+                price: ro.price,
+                qty: ro.remaining_qty,
+                client_order_id: ro.client_order_id.clone(),
+            });
         }
     }
     out
@@ -306,20 +315,20 @@ fn apply_snapshot(st: &mut EngineState, snap: Snapshot) -> io::Result<(usize, us
         let mut book = OrderBook::new();
 
         // Rebuild bids/asks exactly as resting orders.
-        // We push them back into the exact price levels, preserving FIFO.
+        // Push them back into exact price levels, preserving FIFO.
         for o in b.bids.into_iter() {
             orders += 1;
             book.bids
                 .entry(o.price)
                 .or_insert_with(std::collections::VecDeque::new)
-                .push_back(o);
+                .push_back(o.into());
         }
         for o in b.asks.into_iter() {
             orders += 1;
             book.asks
                 .entry(o.price)
                 .or_insert_with(std::collections::VecDeque::new)
-                .push_back(o);
+                .push_back(o.into());
         }
 
         st.books.insert(b.symbol, book);

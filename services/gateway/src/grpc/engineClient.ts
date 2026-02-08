@@ -37,7 +37,7 @@ const ENGINE_ADDR =
 
 const client = new EngineService(ENGINE_ADDR, grpc.credentials.createInsecure());
 
-// ---- Types (minimal, only what we need) ----
+// ---- Types ----
 export type Side = "BUY" | "SELL";
 
 export type SubmitOrderInput = {
@@ -70,6 +70,16 @@ export type BookDepth = {
   asks: BookDepthLevel[];
 };
 
+export type Trade = {
+  trade_id: string | number;
+  symbol: string;
+  price: string | number;
+  qty: string | number;
+  maker_seq: string | number;
+  taker_seq: string | number;
+  taker_side: "BUY" | "SELL";
+};
+
 function unary<TReq, TRes>(method: Function, req: TReq): Promise<TRes> {
   return new Promise((resolve, reject) => {
     method.call(client, req, (err: grpc.ServiceError | null, res: TRes) => {
@@ -87,7 +97,6 @@ export async function health(): Promise<{ status: string }> {
 export async function submitOrder(input: SubmitOrderInput): Promise<SubmitOrderOutput> {
   return unary<any, any>(client.SubmitOrder, {
     symbol: input.symbol,
-    // proto enum Side will accept string names when enums: String is used
     side: input.side,
     price: input.price,
     qty: input.qty,
@@ -95,15 +104,22 @@ export async function submitOrder(input: SubmitOrderInput): Promise<SubmitOrderO
   });
 }
 
-export async function getTopOfBook(symbol: string): Promise<{
-  best_bid_price: string | number;
-  best_bid_qty: string | number;
-  best_ask_price: string | number;
-  best_ask_qty: string | number;
-}> {
+export async function getTopOfBook(symbol: string) {
   return unary<any, any>(client.GetTopOfBook, { symbol });
 }
 
 export async function getBookDepth(symbol: string, levels: number): Promise<BookDepth> {
   return unary<any, any>(client.GetBookDepth, { symbol, levels });
+}
+
+export async function getRecentTrades(
+  symbol: string,
+  after_trade_id: number | string,
+  limit: number
+): Promise<{ trades: Trade[]; last_trade_id: string | number }> {
+  return unary<any, any>(client.GetRecentTrades, {
+    symbol,
+    after_trade_id,
+    limit,
+  });
 }

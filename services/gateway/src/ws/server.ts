@@ -1,6 +1,6 @@
 import http from "http";
 import WebSocket, { WebSocketServer } from "ws";
-import { getTopOfBook } from "../grpc/engineClient";
+import { getTopOfBook, getRecentTrades } from "../grpc/engineClient";
 
 type ClientState = {
   ws: WebSocket;
@@ -25,8 +25,11 @@ export function attachWs(server: http.Server) {
 
   const clients = new Map<WebSocket, ClientState>();
 
-  // Track last payload sent per socket to avoid duplicate pushes
-  const lastSent = new WeakMap<WebSocket, string>();
+  // Track last TOB payload sent per socket to avoid duplicate pushes
+  const lastSentTob = new WeakMap<WebSocket, string>();
+
+  // Track last trade_id seen per symbol
+  const lastTradeIdBySymbol = new Map<string, number>();
 
   wss.on("connection", (ws) => {
     clients.set(ws, { ws, symbol: null });
@@ -47,19 +50,24 @@ export function attachWs(server: http.Server) {
 
       st.symbol = msg.symbol;
 
-      // Force next tick to push immediately
-      lastSent.delete(ws);
+      // Force immediate TOB push on next tick
+      lastSentTob.delete(ws);
+
+      // Initialize trade cursor for this symbol if needed
+      if (!lastTradeIdBySymbol.has(msg.symbol)) {
+        lastTradeIdBySymbol.set(msg.symbol, 0);
+      }
 
       ws.send(JSON.stringify({ type: "subscribed", symbol: msg.symbol }));
     });
 
     ws.on("close", () => {
       clients.delete(ws);
-      lastSent.delete(ws);
+      lastSentTob.delete(ws);
     });
   });
 
-  // Poll loop: fetch TOB per symbol and broadcast ONLY when changed
+  // ---- Poll loop ----
   const interval = setInterval(async () => {
     const symbols = new Set<string>();
     for (const st of clients.values()) {
@@ -67,6 +75,7 @@ export function attachWs(server: http.Server) {
     }
     if (symbols.size === 0) return;
 
+    // ---- Top of book polling ----
     const tobBySymbol = new Map<string, any>();
     for (const sym of symbols) {
       try {
@@ -87,11 +96,38 @@ export function attachWs(server: http.Server) {
       };
 
       const serialized = JSON.stringify(payload);
-      const prev = lastSent.get(st.ws);
-      if (prev === serialized) continue;
+      const prev = lastSentTob.get(st.ws);
+      if (prev !== serialized) {
+        lastSentTob.set(st.ws, serialized);
+        st.ws.send(serialized);
+      }
+    }
 
-      lastSent.set(st.ws, serialized);
-      st.ws.send(serialized);
+    // ---- Trade polling ----
+    for (const sym of symbols) {
+      const after = lastTradeIdBySymbol.get(sym) ?? 0;
+
+      try {
+        const res = await getRecentTrades(sym, after, 100);
+        const trades = res.trades ?? [];
+        if (trades.length === 0) continue;
+
+        lastTradeIdBySymbol.set(sym, Number(res.last_trade_id));
+
+        const msg = JSON.stringify({
+          type: "trades",
+          symbol: sym,
+          trades,
+        });
+
+        for (const st of clients.values()) {
+          if (st.symbol !== sym) continue;
+          if (st.ws.readyState !== WebSocket.OPEN) continue;
+          st.ws.send(msg);
+        }
+      } catch {
+        // ignore trade poll errors
+      }
     }
   }, 100);
 
@@ -100,5 +136,4 @@ export function attachWs(server: http.Server) {
   console.log("WebSocket attached at ws://localhost:8080/ws");
 }
 
-// IMPORTANT: also export default so any module system can import it reliably
 export default attachWs;

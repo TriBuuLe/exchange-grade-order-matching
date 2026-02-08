@@ -1,5 +1,5 @@
-use std::collections::{BTreeMap, VecDeque};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, VecDeque};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Side {
@@ -7,6 +7,12 @@ pub enum Side {
     Sell,
 }
 
+/// Incoming order as accepted by the engine.
+///
+/// Notes:
+/// - `qty` is the requested quantity (must be > 0).
+/// - This type is NOT stored in the book directly (we convert to `RestingOrder` when resting),
+///   which prevents accidental “taker qty mutation” bugs from leaking into resting state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Order {
     pub seq: u64,
@@ -16,8 +22,30 @@ pub struct Order {
     pub client_order_id: String,
 }
 
+/// Resting order stored in the order book.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RestingOrder {
+    pub seq: u64,
+    pub side: Side,
+    pub price: i64,
+    pub remaining_qty: i64,
+    pub client_order_id: String,
+}
+
+impl From<Order> for RestingOrder {
+    fn from(o: Order) -> Self {
+        Self {
+            seq: o.seq,
+            side: o.side,
+            price: o.price,
+            remaining_qty: o.qty,
+            client_order_id: o.client_order_id,
+        }
+    }
+}
+
 /// One fill that happened during matching.
-/// (We are NOT exposing this via API yet; it’s just for correctness + future.)
+/// (API already exposes this via gRPC in your main.rs mapping.)
 #[derive(Debug, Clone)]
 pub struct Fill {
     pub maker_seq: u64,
@@ -31,8 +59,8 @@ pub struct Fill {
 /// - asks: lowest price is best ask
 #[derive(Debug, Default)]
 pub struct OrderBook {
-    pub bids: BTreeMap<i64, VecDeque<Order>>,
-    pub asks: BTreeMap<i64, VecDeque<Order>>,
+    pub bids: BTreeMap<i64, VecDeque<RestingOrder>>,
+    pub asks: BTreeMap<i64, VecDeque<RestingOrder>>,
 }
 
 impl OrderBook {
@@ -44,14 +72,30 @@ impl OrderBook {
     /// - If it crosses the book, match it (price-time priority, FIFO at each level).
     /// - Any remaining qty rests in the book.
     ///
-    /// Returns fills (for future trade reporting).
-    pub fn add(&mut self, mut order: Order) -> Vec<Fill> {
+    /// Returns fills (for trade reporting).
+    pub fn add(&mut self, order: Order) -> Vec<Fill> {
+        // Hard invariants: these should already be validated by the RPC layer,
+        // but we guard here too so replay/future code can’t corrupt state.
+        if order.qty <= 0 {
+            // Reject silently at book level; caller (engine) should have validated already.
+            // This avoids infinite loops / negative resting qty.
+            debug_assert!(order.qty > 0, "OrderBook::add got qty <= 0");
+            return Vec::new();
+        }
+        if order.price < 0 {
+            debug_assert!(order.price >= 0, "OrderBook::add got price < 0");
+            return Vec::new();
+        }
+
         let mut fills: Vec<Fill> = Vec::new();
+
+        // Taker remaining qty (mutated during matching)
+        let mut remaining = order.qty;
 
         match order.side {
             Side::Buy => {
                 // BUY crosses if buy_price >= best_ask
-                while order.qty > 0 {
+                while remaining > 0 {
                     let best_ask_price = match self.asks.keys().next().copied() {
                         Some(p) => p,
                         None => break, // no liquidity
@@ -69,15 +113,26 @@ impl OrderBook {
                             .get_mut(&best_ask_price)
                             .expect("ask level disappeared");
 
-                        while order.qty > 0 {
+                        while remaining > 0 {
                             let Some(front) = q.front_mut() else {
                                 remove_level = true;
                                 break;
                             };
 
-                            let traded = order.qty.min(front.qty);
-                            order.qty -= traded;
-                            front.qty -= traded;
+                            // Maker remaining qty must always be > 0
+                            debug_assert!(
+                                front.remaining_qty > 0,
+                                "resting maker has non-positive remaining_qty"
+                            );
+                            if front.remaining_qty <= 0 {
+                                // Defensive: remove corrupt maker and continue.
+                                q.pop_front();
+                                continue;
+                            }
+
+                            let traded = remaining.min(front.remaining_qty);
+                            remaining -= traded;
+                            front.remaining_qty -= traded;
 
                             fills.push(Fill {
                                 maker_seq: front.seq,
@@ -86,12 +141,12 @@ impl OrderBook {
                                 qty: traded,
                             });
 
-                            if front.qty == 0 {
+                            if front.remaining_qty == 0 {
                                 q.pop_front();
                                 continue;
                             }
 
-                            if order.qty == 0 {
+                            if remaining == 0 {
                                 break;
                             }
                         }
@@ -107,17 +162,25 @@ impl OrderBook {
                 }
 
                 // If remaining qty, rest as bid at its limit price
-                if order.qty > 0 {
+                if remaining > 0 {
+                    let resting = RestingOrder {
+                        seq: order.seq,
+                        side: order.side,
+                        price: order.price,
+                        remaining_qty: remaining,
+                        client_order_id: order.client_order_id.clone(),
+                    };
+
                     self.bids
                         .entry(order.price)
                         .or_insert_with(VecDeque::new)
-                        .push_back(order);
+                        .push_back(resting);
                 }
             }
 
             Side::Sell => {
                 // SELL crosses if sell_price <= best_bid
-                while order.qty > 0 {
+                while remaining > 0 {
                     let best_bid_price = match self.bids.keys().next_back().copied() {
                         Some(p) => p,
                         None => break, // no liquidity
@@ -135,15 +198,24 @@ impl OrderBook {
                             .get_mut(&best_bid_price)
                             .expect("bid level disappeared");
 
-                        while order.qty > 0 {
+                        while remaining > 0 {
                             let Some(front) = q.front_mut() else {
                                 remove_level = true;
                                 break;
                             };
 
-                            let traded = order.qty.min(front.qty);
-                            order.qty -= traded;
-                            front.qty -= traded;
+                            debug_assert!(
+                                front.remaining_qty > 0,
+                                "resting maker has non-positive remaining_qty"
+                            );
+                            if front.remaining_qty <= 0 {
+                                q.pop_front();
+                                continue;
+                            }
+
+                            let traded = remaining.min(front.remaining_qty);
+                            remaining -= traded;
+                            front.remaining_qty -= traded;
 
                             fills.push(Fill {
                                 maker_seq: front.seq,
@@ -152,12 +224,12 @@ impl OrderBook {
                                 qty: traded,
                             });
 
-                            if front.qty == 0 {
+                            if front.remaining_qty == 0 {
                                 q.pop_front();
                                 continue;
                             }
 
-                            if order.qty == 0 {
+                            if remaining == 0 {
                                 break;
                             }
                         }
@@ -173,11 +245,19 @@ impl OrderBook {
                 }
 
                 // If remaining qty, rest as ask at its limit price
-                if order.qty > 0 {
+                if remaining > 0 {
+                    let resting = RestingOrder {
+                        seq: order.seq,
+                        side: order.side,
+                        price: order.price,
+                        remaining_qty: remaining,
+                        client_order_id: order.client_order_id.clone(),
+                    };
+
                     self.asks
                         .entry(order.price)
                         .or_insert_with(VecDeque::new)
-                        .push_back(order);
+                        .push_back(resting);
                 }
             }
         }
@@ -191,14 +271,14 @@ impl OrderBook {
             .bids
             .iter()
             .next_back() // highest bid
-            .map(|(price, q)| (*price, q.iter().map(|o| o.qty).sum()))
+            .map(|(price, q)| (*price, q.iter().map(|o| o.remaining_qty).sum()))
             .unwrap_or((0, 0));
 
         let (best_ask_price, best_ask_qty) = self
             .asks
             .iter()
             .next() // lowest ask
-            .map(|(price, q)| (*price, q.iter().map(|o| o.qty).sum()))
+            .map(|(price, q)| (*price, q.iter().map(|o| o.remaining_qty).sum()))
             .unwrap_or((0, 0));
 
         (best_bid_price, best_bid_qty, best_ask_price, best_ask_qty)
@@ -231,7 +311,10 @@ mod tests {
 
         // depth at level exists
         assert_eq!(book.bids.get(&100).unwrap().len(), 1);
-        assert_eq!(book.bids.get(&100).unwrap().front().unwrap().qty, 5);
+        assert_eq!(
+            book.bids.get(&100).unwrap().front().unwrap().remaining_qty,
+            5
+        );
     }
 
     #[test]
@@ -260,7 +343,7 @@ mod tests {
         let q = book.asks.get(&102).unwrap();
         assert_eq!(q.len(), 1);
         assert_eq!(q.front().unwrap().seq, 2);
-        assert_eq!(q.front().unwrap().qty, 1);
+        assert_eq!(q.front().unwrap().remaining_qty, 1);
 
         // No bids should rest (taker fully filled)
         assert!(book.bids.is_empty());
@@ -295,7 +378,7 @@ mod tests {
         let q = book.bids.get(&99).unwrap();
         assert_eq!(q.len(), 1);
         assert_eq!(q.front().unwrap().seq, 2);
-        assert_eq!(q.front().unwrap().qty, 2);
+        assert_eq!(q.front().unwrap().remaining_qty, 2);
 
         // No asks should rest (taker fully filled)
         assert!(book.asks.is_empty());
@@ -329,7 +412,7 @@ mod tests {
         let q = book.asks.get(&101).unwrap();
         assert_eq!(q.len(), 1);
         assert_eq!(q.front().unwrap().seq, 2);
-        assert_eq!(q.front().unwrap().qty, 1);
+        assert_eq!(q.front().unwrap().remaining_qty, 1);
     }
 
     #[test]
@@ -352,7 +435,7 @@ mod tests {
         let qb = book.bids.get(&101).unwrap();
         assert_eq!(qb.len(), 1);
         assert_eq!(qb.front().unwrap().seq, 2);
-        assert_eq!(qb.front().unwrap().qty, 3);
+        assert_eq!(qb.front().unwrap().remaining_qty, 3);
 
         let (bbp, bbq, bap, baq) = book.top_of_book();
         assert_eq!((bbp, bbq, bap, baq), (101, 3, 0, 0));

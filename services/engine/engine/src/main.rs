@@ -3,7 +3,7 @@
 mod order_book;
 mod wal;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use order_book::{Order, OrderBook, Side as BookSide};
@@ -17,15 +17,34 @@ pub mod engine {
 
 use engine::engine_server::{Engine, EngineServer};
 use engine::{
-    Fill, GetBookDepthRequest, GetBookDepthResponse, GetTopOfBookRequest, GetTopOfBookResponse,
-    HealthRequest, HealthResponse, PriceLevel, Side, SubmitOrderRequest, SubmitOrderResponse,
+    Fill, GetBookDepthRequest, GetBookDepthResponse, GetRecentTradesRequest, GetRecentTradesResponse,
+    GetTopOfBookRequest, GetTopOfBookResponse, HealthRequest, HealthResponse, PriceLevel, Side,
+    SubmitOrderRequest, SubmitOrderResponse, Trade,
 };
 
-#[derive(Debug, Default)]
+const MAX_TRADES_PER_SYMBOL: usize = 10_000;
+const MAX_TRADES_LIMIT: usize = 1_000;
+
+#[derive(Debug)]
 pub struct EngineState {
     pub seq: u64,
     // symbol -> full price-level book (real FIFO order book)
     pub books: HashMap<String, OrderBook>,
+
+    // Trade tape (pull-based). Per symbol ring buffer of recent trades.
+    pub next_trade_id: u64,
+    pub trades: HashMap<String, VecDeque<Trade>>,
+}
+
+impl Default for EngineState {
+    fn default() -> Self {
+        Self {
+            seq: 0,
+            books: HashMap::new(),
+            next_trade_id: 0,
+            trades: HashMap::new(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -46,6 +65,24 @@ impl EngineSvc {
     fn next_seq(st: &mut EngineState) -> u64 {
         st.seq += 1;
         st.seq
+    }
+
+    fn next_trade_id(st: &mut EngineState) -> u64 {
+        st.next_trade_id += 1;
+        st.next_trade_id
+    }
+
+    fn append_trade(st: &mut EngineState, symbol: &str, trade: Trade) {
+        let q = st
+            .trades
+            .entry(symbol.to_string())
+            .or_insert_with(VecDeque::new);
+        q.push_back(trade);
+
+        // Bounded memory
+        while q.len() > MAX_TRADES_PER_SYMBOL {
+            q.pop_front();
+        }
     }
 }
 
@@ -130,15 +167,39 @@ impl Engine for EngineSvc {
                 client_order_id: client_order_id.clone(),
             });
 
-            let fills_out: Vec<Fill> = fills
-                .into_iter()
-                .map(|f| Fill {
+            // Map internal fills to gRPC fills AND append trades to the tape.
+            // Each Fill becomes one Trade. trade_id monotonic in engine state.
+            let mut fills_out: Vec<Fill> = Vec::with_capacity(fills.len());
+
+            for f in fills.into_iter() {
+                fills_out.push(Fill {
                     maker_seq: f.maker_seq,
                     taker_seq: f.taker_seq,
                     price: f.price,
                     qty: f.qty,
-                })
-                .collect();
+                });
+
+                let trade_id = Self::next_trade_id(st);
+
+                // taker_side: the incoming order's side
+                let taker_side = if o.side == Side::Buy as i32 {
+                    Side::Buy
+                } else {
+                    Side::Sell
+                };
+
+                let trade = Trade {
+                    trade_id,
+                    symbol: symbol.clone(),
+                    price: f.price,
+                    qty: f.qty,
+                    maker_seq: f.maker_seq,
+                    taker_seq: f.taker_seq,
+                    taker_side: taker_side as i32,
+                };
+
+                Self::append_trade(st, &symbol, trade);
+            }
 
             Ok((seq, fills_out))
         })?;
@@ -202,7 +263,7 @@ impl Engine for EngineSvc {
                 .take(levels)
                 .map(|(price, q)| PriceLevel {
                     price: *price,
-                    qty: q.iter().map(|o| o.qty).sum::<i64>(),
+                    qty: q.iter().map(|o| o.remaining_qty).sum::<i64>(),
                 })
                 .collect();
 
@@ -212,7 +273,7 @@ impl Engine for EngineSvc {
                 .take(levels)
                 .map(|(price, q)| PriceLevel {
                     price: *price,
-                    qty: q.iter().map(|o| o.qty).sum::<i64>(),
+                    qty: q.iter().map(|o| o.remaining_qty).sum::<i64>(),
                 })
                 .collect();
 
@@ -220,6 +281,55 @@ impl Engine for EngineSvc {
         });
 
         Ok(Response::new(GetBookDepthResponse { bids, asks }))
+    }
+
+    async fn get_recent_trades(
+        &self,
+        req: Request<GetRecentTradesRequest>,
+    ) -> Result<Response<GetRecentTradesResponse>, Status> {
+        let r = req.into_inner();
+        let symbol = r.symbol.trim().to_string();
+        if symbol.is_empty() {
+            return Err(Status::invalid_argument("symbol must be non-empty"));
+        }
+
+        let after_trade_id = r.after_trade_id;
+        let mut limit: usize = if r.limit <= 0 { 50 } else { r.limit as usize };
+        if limit > MAX_TRADES_LIMIT {
+            limit = MAX_TRADES_LIMIT;
+        }
+
+        let (trades, last_trade_id) = self.with_state(|st| {
+            let q = match st.trades.get(&symbol) {
+                Some(q) => q,
+                None => return (Vec::new(), after_trade_id),
+            };
+
+            // trades are stored in ascending trade_id order
+            let mut out: Vec<Trade> = Vec::new();
+            out.reserve(limit);
+
+            for t in q.iter() {
+                if t.trade_id > after_trade_id {
+                    out.push(t.clone());
+                    if out.len() >= limit {
+                        break;
+                    }
+                }
+            }
+
+            let last = out
+                .last()
+                .map(|t| t.trade_id)
+                .unwrap_or(after_trade_id);
+
+            (out, last)
+        });
+
+        Ok(Response::new(GetRecentTradesResponse {
+            trades,
+            last_trade_id,
+        }))
     }
 }
 

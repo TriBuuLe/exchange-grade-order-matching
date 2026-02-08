@@ -6,6 +6,9 @@ service Engine {
   rpc SubmitOrder(SubmitOrderRequest) returns (SubmitOrderResponse);
   rpc GetTopOfBook(GetTopOfBookRequest) returns (GetTopOfBookResponse);
   rpc GetBookDepth(GetBookDepthRequest) returns (GetBookDepthResponse);
+
+  // NEW: Pull-based trade stream (polling)
+  rpc GetRecentTrades(GetRecentTradesRequest) returns (GetRecentTradesResponse);
 }
 
 message HealthRequest {}
@@ -66,4 +69,27 @@ message GetBookDepthRequest {
 message GetBookDepthResponse {
   repeated PriceLevel bids = 1;
   repeated PriceLevel asks = 2;
+}
+
+// ---------- Trades (Tape) ----------
+
+message Trade {
+  uint64 trade_id = 1;   // engine-monotonic, deterministic
+  string symbol = 2;
+  int64 price = 3;
+  int64 qty = 4;
+  uint64 maker_seq = 5;
+  uint64 taker_seq = 6;
+  Side taker_side = 7;   // BUY or SELL (who initiated)
+}
+
+message GetRecentTradesRequest {
+  string symbol = 1;
+  uint64 after_trade_id = 2; // return trades with trade_id > this
+  int32 limit = 3;           // max trades to return (server caps)
+}
+
+message GetRecentTradesResponse {
+  repeated Trade trades = 1;
+  uint64 last_trade_id = 2;  // max trade_id in response, or echo after_trade_id if none
 }
