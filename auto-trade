@@ -3,28 +3,57 @@ set -euo pipefail
 
 BASE="${BASE:-http://localhost:8080}"
 SYM="${SYM:-BTC-USD}"
-T="${T:-60}"
+T="${T:-120}"
 
-MID="${MID:-900}"
-MU="${MU:-900}"
+# --- Hard bounds ---
+MIN_P="${MIN_P:-500}"
+MAX_P="${MAX_P:-5000}"
 
-KAPPA_BPS="${KAPPA_BPS:-80}"
+# If MID=0, random start
+MID="${MID:-0}"
 
-SIGMA="${SIGMA:-18}"
-JUMP_PCT="${JUMP_PCT:-6}"
-JUMP_MIN="${JUMP_MIN:-60}"
-JUMP_MAX="${JUMP_MAX:-220}"
+# Mean reversion (set low so it doesn't "stick" too hard)
+KAPPA_BPS="${KAPPA_BPS:-12}"     # smaller = freer wandering
 
-BASE_SPREAD="${BASE_SPREAD:-6}"
-SPREAD_JITTER="${SPREAD_JITTER:-6}"
-LEVELS="${LEVELS:-10}"
-LEVEL_STEP="${LEVEL_STEP:-2}"
-SEED_Q_MIN="${SEED_Q_MIN:-4}"
-SEED_Q_MAX="${SEED_Q_MAX:-30}"
+# Base vol + max vol (we will switch regimes)
+SIGMA_LOW="${SIGMA_LOW:-80}"
+SIGMA_HIGH="${SIGMA_HIGH:-420}"
 
-PRINTS="${PRINTS:-14}"
+# Jump (fat tails)
+JUMP_PCT="${JUMP_PCT:-22}"
+JUMP_MIN="${JUMP_MIN:-200}"
+JUMP_MAX="${JUMP_MAX:-1400}"
+
+# Regime shifts (MU changes)
+MU_TELEPORT_PCT="${MU_TELEPORT_PCT:-18}"   # % each second
+MU_STEP_MIN="${MU_STEP_MIN:-300}"
+MU_STEP_MAX="${MU_STEP_MAX:-2200}"
+
+# MID teleports (makes it truly roam across entire range)
+MID_TELEPORT_PCT="${MID_TELEPORT_PCT:-6}"  # % each second
+
+# Volatility regime (quiet vs wild)
+VOL_REGIME_PCT="${VOL_REGIME_PCT:-10}"     # % each second to flip vol regime
+
+# Crash/pump events (rare but dramatic)
+CRASH_PCT="${CRASH_PCT:-4}"      # % each second
+CRASH_MIN="${CRASH_MIN:-700}"
+CRASH_MAX="${CRASH_MAX:-2500}"
+
+# Book shape
+BASE_SPREAD="${BASE_SPREAD:-25}"
+SPREAD_JITTER="${SPREAD_JITTER:-35}"
+LEVELS="${LEVELS:-14}"
+LEVEL_STEP="${LEVEL_STEP:-8}"
+SEED_Q_MIN="${SEED_Q_MIN:-2}"
+SEED_Q_MAX="${SEED_Q_MAX:-45}"
+
+# Force trades
+ENABLE_TAKERS="${ENABLE_TAKERS:-1}"
+TAKER_PCT="${TAKER_PCT:-65}"
 TAKER_Q_MIN="${TAKER_Q_MIN:-1}"
-TAKER_Q_MAX="${TAKER_Q_MAX:-12}"
+TAKER_Q_MAX="${TAKER_Q_MAX:-30}"
+TAKER_SLIP_MAX="${TAKER_SLIP_MAX:-220}"
 
 post() {
   local side="$1" price="$2" qty="$3"
@@ -36,32 +65,96 @@ post() {
 rand_range() { local a="$1" b="$2"; echo $(( a + RANDOM % (b - a + 1) )); }
 coin() { local pct="$1"; local r=$(( RANDOM % 100 )); (( r < pct )) && echo 1 || echo 0; }
 
+clamp() {
+  local x="$1" lo="$2" hi="$3"
+  (( x < lo )) && x="$lo"
+  (( x > hi )) && x="$hi"
+  echo "$x"
+}
+
+# Init
+if (( MID == 0 )); then MID=$(rand_range "$MIN_P" "$MAX_P"); fi
+MU=$(rand_range "$MIN_P" "$MAX_P")
+
+# Start in a random vol regime
+VOL="LOW"
+SIGMA="$SIGMA_LOW"
+if (( RANDOM % 2 == 0 )); then VOL="HIGH"; SIGMA="$SIGMA_HIGH"; fi
+
 echo "Random-market sim for $SYM ($T sec) at $BASE"
+echo "Range: [$MIN_P, $MAX_P], start MID=$MID MU=$MU vol=$VOL sigma=$SIGMA"
 
 for sec in $(seq 1 "$T"); do
-  noise=$(rand_range $((-SIGMA)) "$SIGMA")
+  # Flip volatility regime sometimes
+  if [[ "$(coin "$VOL_REGIME_PCT")" == "1" ]]; then
+    if [[ "$VOL" == "LOW" ]]; then VOL="HIGH"; SIGMA="$SIGMA_HIGH";
+    else VOL="LOW"; SIGMA="$SIGMA_LOW"; fi
+  fi
+
+  # MU teleports/steps often
+  if [[ "$(coin "$MU_TELEPORT_PCT")" == "1" ]]; then
+    if (( RANDOM % 2 == 0 )); then
+      MU=$(rand_range "$MIN_P" "$MAX_P")
+    else
+      step=$(rand_range "$MU_STEP_MIN" "$MU_STEP_MAX")
+      dir=$(( (RANDOM % 2) == 0 ? -1 : 1 ))
+      MU=$(( MU + dir * step ))
+      MU=$(clamp "$MU" "$MIN_P" "$MAX_P")
+    fi
+  fi
+
+  # MID teleport sometimes (this is what makes it roam hard)
+  if [[ "$(coin "$MID_TELEPORT_PCT")" == "1" ]]; then
+    MID=$(rand_range "$MIN_P" "$MAX_P")
+  fi
+
+  # Mean reversion drift towards MU (weak)
   drift=$(( (MU - MID) * KAPPA_BPS / 10000 ))
 
+  # Noise
+  noise=$(rand_range $((-SIGMA)) "$SIGMA")
+
+  # Jump
   if [[ "$(coin "$JUMP_PCT")" == "1" ]]; then
     jmag=$(rand_range "$JUMP_MIN" "$JUMP_MAX")
     jdir=$(( (RANDOM % 2) == 0 ? -1 : 1 ))
     noise=$(( noise + jdir * jmag ))
   fi
 
+  # Rare crash/pump event
+  if [[ "$(coin "$CRASH_PCT")" == "1" ]]; then
+    cmag=$(rand_range "$CRASH_MIN" "$CRASH_MAX")
+    cdir=$(( (RANDOM % 2) == 0 ? -1 : 1 ))
+    noise=$(( noise + cdir * cmag ))
+  fi
+
   MID=$(( MID + drift + noise ))
-  (( MID < 50 )) && MID=50
+  MID=$(clamp "$MID" "$MIN_P" "$MAX_P")
 
   half=$(( BASE_SPREAD + (RANDOM % (SPREAD_JITTER + 1)) ))
   bid0=$(( MID - half ))
   ask0=$(( MID + half ))
 
+  # Seed L2 book
   for lvl in $(seq 0 $((LEVELS-1))); do
     q=$(rand_range "$SEED_Q_MIN" "$SEED_Q_MAX")
     post "BUY"  "$((bid0 - lvl*LEVEL_STEP))" "$q" &
     post "SELL" "$((ask0 + lvl*LEVEL_STEP))" "$q" &
   done
-  wait
 
+  # Taker orders to ensure trades and candles
+  if [[ "$ENABLE_TAKERS" == "1" && "$(coin "$TAKER_PCT")" == "1" ]]; then
+    tq=$(rand_range "$TAKER_Q_MIN" "$TAKER_Q_MAX")
+    slip=$(rand_range 0 "$TAKER_SLIP_MAX")
+    if (( RANDOM % 2 == 0 )); then
+      post "BUY" "$((ask0 + slip))" "$tq" &
+    else
+      post "SELL" "$((bid0 - slip))" "$tq" &
+    fi
+  fi
+
+  wait
+  echo "t=$sec MID=$MID MU=$MU vol=$VOL sigma=$SIGMA bid0=$bid0 ask0=$ask0"
   sleep 1
 done
 

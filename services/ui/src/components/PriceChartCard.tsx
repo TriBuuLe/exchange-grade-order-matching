@@ -25,7 +25,7 @@ type Props = {
   gatewayBaseUrl: () => string;
 };
 
-const WINDOW = 120; // how many candles to display (sliding window)
+const WINDOW = 50; // how many candles to display (sliding window)
 
 function fmt(ts: number) {
   try {
@@ -37,6 +37,61 @@ function fmt(ts: number) {
   } catch {
     return String(ts);
   }
+}
+
+function intervalToMs(interval: string): number {
+  const v = String(interval ?? "").trim().toLowerCase();
+  const map: Record<string, number> = {
+    "1s": 1_000,
+    "5s": 5_000,
+    "10s": 10_000,
+    "30s": 30_000,
+    "1m": 60_000,
+    "5m": 300_000,
+    "15m": 900_000,
+    "1h": 3_600_000,
+  };
+  return map[v] ?? 1_000;
+}
+
+function bucketStart(tsMs: number, intervalMs: number): number {
+  return Math.floor(tsMs / intervalMs) * intervalMs;
+}
+
+/**
+ * Ensure the candle series reaches "now" even if there are no trades.
+ * Missing buckets become flat candles at last close (volume=0).
+ */
+function gapFillToNow(prev: Candle[], intervalMs: number, window: number): Candle[] {
+  if (!prev.length) return prev;
+
+  const out = prev.slice();
+
+  // Align to interval bucket
+  const nowBucket = bucketStart(Date.now(), intervalMs);
+
+  // If the last candle already reaches current bucket, nothing to do.
+  let last = out[out.length - 1];
+  if (last.ts >= nowBucket) return out.slice(-window);
+
+  // Fill missing buckets with flat candles
+  let ts = last.ts + intervalMs;
+  while (ts <= nowBucket) {
+    const close = last.close;
+    const flat: Candle = {
+      ts,
+      open: close,
+      high: close,
+      low: close,
+      close: close,
+      volume: 0,
+    };
+    out.push(flat);
+    last = flat;
+    ts += intervalMs;
+  }
+
+  return out.slice(-window);
 }
 
 export default function PriceChartCard({ symbol, gatewayBaseUrl }: Props) {
@@ -68,30 +123,38 @@ export default function PriceChartCard({ symbol, gatewayBaseUrl }: Props) {
         if (!alive) return;
 
         const incoming = data.candles.slice(-WINDOW);
+        const intervalMs = intervalToMs(interval);
 
-        // ✅ REAL sliding window:
-        // - append only NEW candles by ts (so it "moves forward")
-        // - if same ts (current bucket updated), replace last candle in-place
+        // ✅ REAL sliding window + ✅ gap fill to keep time moving
         setCandles((prev) => {
-          if (!incoming.length) return prev;
-          if (!prev.length) return incoming.slice(-WINDOW);
+          let next: Candle[];
 
-          const lastPrevTs = prev[prev.length - 1].ts;
-          const newer = incoming.filter((c) => c.ts > lastPrevTs);
+          if (!incoming.length) {
+            // No data from backend: still try to keep time moving off prev
+            next = prev.slice();
+          } else if (!prev.length) {
+            next = incoming.slice(-WINDOW);
+          } else {
+            const lastPrevTs = prev[prev.length - 1].ts;
+            const newer = incoming.filter((c) => c.ts > lastPrevTs);
 
-          if (newer.length) {
-            return [...prev, ...newer].slice(-WINDOW);
+            if (newer.length) {
+              next = [...prev, ...newer].slice(-WINDOW);
+            } else {
+              const lastIncoming = incoming[incoming.length - 1];
+              if (lastIncoming.ts === lastPrevTs) {
+                const copy = prev.slice();
+                copy[copy.length - 1] = lastIncoming;
+                next = copy.slice(-WINDOW);
+              } else {
+                // backend window moved backwards (restart / reset) -> hard reset
+                next = incoming.slice(-WINDOW);
+              }
+            }
           }
 
-          const lastIncoming = incoming[incoming.length - 1];
-          if (lastIncoming.ts === lastPrevTs) {
-            const copy = prev.slice();
-            copy[copy.length - 1] = lastIncoming;
-            return copy.slice(-WINDOW);
-          }
-
-          // backend window moved backwards (restart / reset) -> hard reset
-          return incoming.slice(-WINDOW);
+          // ✅ Key behavior: even with no new trades, keep advancing buckets
+          return gapFillToNow(next, intervalMs, WINDOW);
         });
 
         setError("");
