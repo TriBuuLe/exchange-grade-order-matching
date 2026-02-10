@@ -3,7 +3,7 @@ set -euo pipefail
 
 BASE="${BASE:-http://localhost:8080}"
 SYM="${SYM:-BTC-USD}"
-T="${T:-120}"
+T="${T:-1000}"
 
 # --- Hard bounds ---
 MIN_P="${MIN_P:-500}"

@@ -353,7 +353,7 @@ export default function Page() {
     <main className="min-h-screen bg-neutral-950 text-neutral-100">
       <div className="mx-auto max-w-5xl px-6 py-10">
         <MarketHeader
-          title="Exchange UI"
+          title="Exchange Order Matching Engine"
           subtitle="Live Top-of-Book + Depth + Order Entry via Gateway"
           status={status}
           showDebug={showDebug}
