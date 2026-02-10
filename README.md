@@ -61,6 +61,7 @@ The entire exchange stack is fully containerized.
 **No manual setup is required beyond Docker.**
 
 ### Prerequisites
+- Window Subsystem for Linux (WSL)
 - Docker
 - Docker Compose (included with Docker Desktop)
 
@@ -80,4 +81,9 @@ rm -f services/engine/engine/data/snapshot.json services/engine/engine/data/wal.
 docker-compose up --build
 ```
 
-
+## Trading Bots
+```bash
+cd exchange-grade-order-matching
+./auto-trade
+```
+Open more terminal and run the same script if you want to simulate trading bots trading concurrently.
