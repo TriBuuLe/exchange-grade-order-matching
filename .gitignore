@@ -8,3 +8,8 @@
 # Env
 .env
 .env.*
+
+# Exchange runtime state
+services/engine/engine/data/*
+!services/engine/engine/data/.gitkeep
+
