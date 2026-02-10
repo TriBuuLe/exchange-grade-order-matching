@@ -86,4 +86,4 @@ docker-compose up --build
 cd exchange-grade-order-matching
 ./auto-trade
 ```
-Open more terminal and run the same script if you want to simulate concurrently trading.
+Open more terminal and run the same script if you want to simulate concurrent trading.
