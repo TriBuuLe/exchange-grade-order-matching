@@ -4,14 +4,12 @@ import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 
 /**
- * Repo layout:
- *   exchange-engine/
- *     proto/engine.proto
- *     services/gateway/src/grpc/engineClient.ts
- *
- * From this file, go up 4 levels to repo root, then /proto/engine.proto
+ * Layout inside gateway container:
+ *   /app
+ *     ├── src/grpc/engineClient.ts
+ *     └── proto/engine.proto
  */
-const PROTO_PATH = path.resolve(__dirname, "../../../../proto/engine.proto");
+const PROTO_PATH = path.resolve(__dirname, "../../proto/engine.proto");
 
 const packageDef = protoLoader.loadSync(PROTO_PATH, {
   keepCase: true,
@@ -23,19 +21,22 @@ const packageDef = protoLoader.loadSync(PROTO_PATH, {
 
 const loaded = grpc.loadPackageDefinition(packageDef) as any;
 
-// From proto: package engine.v1; service Engine { ... }
+// proto: package engine.v1; service Engine { ... }
 const EngineService = loaded?.engine?.v1?.Engine;
 if (!EngineService) {
-  throw new Error(
-    "gRPC service not found at loaded.engine.v1.Engine (check proto path/package/service)"
-  );
+  throw new Error("gRPC Engine service not found (check proto package/service)");
 }
 
-// Prefer ENGINE_GRPC_ADDR, fallback to ENGINE_ADDR for compatibility
+// Prefer ENGINE_GRPC_ADDR, fallback for safety
 const ENGINE_ADDR =
-  process.env.ENGINE_GRPC_ADDR ?? process.env.ENGINE_ADDR ?? "127.0.0.1:50051";
+  process.env.ENGINE_GRPC_ADDR ??
+  process.env.ENGINE_ADDR ??
+  "127.0.0.1:50051";
 
-const client = new EngineService(ENGINE_ADDR, grpc.credentials.createInsecure());
+const client = new EngineService(
+  ENGINE_ADDR,
+  grpc.credentials.createInsecure()
+);
 
 // ---- Types ----
 export type Side = "BUY" | "SELL";
@@ -80,22 +81,28 @@ export type Trade = {
   taker_side: "BUY" | "SELL";
 };
 
-function unary<TReq, TRes>(method: Function, req: TReq): Promise<TRes> {
+// ---- Helpers ----
+function unary<TReq, TRes>(
+  method: (req: TReq, cb: grpc.requestCallback<TRes>) => void,
+  req: TReq
+): Promise<TRes> {
   return new Promise((resolve, reject) => {
-    method.call(client, req, (err: grpc.ServiceError | null, res: TRes) => {
+    method.call(client, req, (err, res) => {
       if (err) return reject(err);
       resolve(res);
     });
   });
 }
 
-// ---- API ----
+// ---- API (NOTE: lowerCamelCase RPC names) ----
 export async function health(): Promise<{ status: string }> {
-  return unary<{}, { status: string }>(client.Health, {});
+  return unary(client.health, {});
 }
 
-export async function submitOrder(input: SubmitOrderInput): Promise<SubmitOrderOutput> {
-  return unary<any, any>(client.SubmitOrder, {
+export async function submitOrder(
+  input: SubmitOrderInput
+): Promise<SubmitOrderOutput> {
+  return unary(client.submitOrder, {
     symbol: input.symbol,
     side: input.side,
     price: input.price,
@@ -105,11 +112,14 @@ export async function submitOrder(input: SubmitOrderInput): Promise<SubmitOrderO
 }
 
 export async function getTopOfBook(symbol: string) {
-  return unary<any, any>(client.GetTopOfBook, { symbol });
+  return unary(client.getTopOfBook, { symbol });
 }
 
-export async function getBookDepth(symbol: string, levels: number): Promise<BookDepth> {
-  return unary<any, any>(client.GetBookDepth, { symbol, levels });
+export async function getBookDepth(
+  symbol: string,
+  levels: number
+): Promise<BookDepth> {
+  return unary(client.getBookDepth, { symbol, levels });
 }
 
 export async function getRecentTrades(
@@ -117,7 +127,7 @@ export async function getRecentTrades(
   after_trade_id: number | string,
   limit: number
 ): Promise<{ trades: Trade[]; last_trade_id: string | number }> {
-  return unary<any, any>(client.GetRecentTrades, {
+  return unary(client.getRecentTrades, {
     symbol,
     after_trade_id,
     limit,
