@@ -55,62 +55,28 @@ This separation is intentional and mirrors real-world exchange architecture wher
 
 ## How to Set Up and Run Locally
 
+## Running the System (Docker)
+
+The entire exchange stack is fully containerized.  
+**No manual setup is required beyond Docker.**
+
 ### Prerequisites
+- Docker
+- Docker Compose (included with Docker Desktop)
 
-You must have the following installed:
+### Quick Start
 
-- Rust (via rustup)
-- Node.js (v18+ recommended)
-- npm
-- protoc (Protocol Buffers compiler)
-
-Verify installations:
-
-```bash
-cargo --version
-node --version
-npm --version
-protoc --version
-grpcurl -version
-```
-### Clone the Repository
 ```bash
 git clone https://github.com/TriBuuLe/exchange-grade-order-matching.git
 cd exchange-grade-order-matching
-```
-### Install Dependencies
-```bash
-cd services/gateway && npm install
-cd ../ui && npm install
+docker-compose up --build
 ```
 
-## Run the System (Development)
-- This project uses a Makefile so you do not need to manually cd into service directories.
-- Open three terminals and run the following commands from the repository root.
-### Start the Engine (gRPC – port 50051)
+## Reset The Market
 ```bash
-make engine
-```
-- You should see: engine listening on 0.0.0.0:50051
-
-### Start the Gateway (REST - port 8080)
-```bash
-make gateway
-```
-
-### Start the UI (Next.js - port 3000)
-```bash
-make ui
-```
-- Open your browser: http://localhost:3000
-
-## Resetting the System (Start from Scratch and remove all existed data)
-```bash
-rm -f services/engine/engine/data/snapshot.json
-rm -f services/engine/engine/data/wal.jsonl
-make engine
-make gateway
-make ui
+cd exchange-grade-order-matching
+rm -f services/engine/engine/data/snapshot.json services/engine/engine/data/wal.jsonl
+docker-compose up --build
 ```
 
 
