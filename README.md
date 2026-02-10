@@ -71,6 +71,7 @@ git clone https://github.com/TriBuuLe/exchange-grade-order-matching.git
 cd exchange-grade-order-matching
 docker-compose up --build
 ```
+Go to http://localhost:3000/ for live demo
 
 ## Reset The Market
 ```bash
